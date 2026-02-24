@@ -206,8 +206,9 @@ class GardenHorizonsBot:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/json',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache'
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
         })
         
         self.setup_handlers()
@@ -219,6 +220,7 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("notifications_on", self.cmd_notifications_on))
         self.application.add_handler(CommandHandler("notifications_off", self.cmd_notifications_off))
         self.application.add_handler(CommandHandler("mailing", self.cmd_mailing))
+        self.application.add_handler(CommandHandler("testapi", self.cmd_test_api))  # Новая тестовая команда
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
     
     async def check_subscription(self, user_id: int) -> bool:
@@ -370,6 +372,34 @@ class GardenHorizonsBot:
         ]
         
         await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    async def cmd_test_api(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Тестовая команда для проверки API"""
+        if update.effective_user.id != ADMIN_ID:
+            await update.message.reply_html("<b>❌ Только для админа!</b>")
+            return
+        
+        await update.message.reply_html("<b>🔍 Тестирую API...</b>")
+        
+        # Запрос без force
+        data1 = self.fetch_api_data(force=False)
+        
+        # Запрос с force
+        data2 = self.fetch_api_data(force=True)
+        
+        # Текущее время сервера
+        current_time = datetime.now().isoformat()
+        
+        msg = (
+            f"<b>📊 ТЕСТ API</b>\n\n"
+            f"<b>Без force:</b>\n{data1.get('lastGlobalUpdate') if data1 else '❌'}\n\n"
+            f"<b>С force:</b>\n{data2.get('lastGlobalUpdate') if data2 else '❌'}\n\n"
+            f"<b>Текущее время:</b>\n{current_time}\n\n"
+            f"<b>Данные совпадают:</b> "
+            f"{'✅ ДА' if data1 and data2 and data1.get('lastGlobalUpdate') == data2.get('lastGlobalUpdate') else '❌ НЕТ'}"
+        )
+        
+        await update.message.reply_html(msg)
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -689,14 +719,23 @@ class GardenHorizonsBot:
             )
     
     def fetch_api_data(self, force=False) -> Optional[Dict]:
-        """Получение данных из API с подробным логированием"""
+        """Получение данных из API с подробным логированием и анти-кэш заголовками"""
         try:
             url = API_URL
             if force:
                 url = f"{API_URL}?t={int(datetime.now().timestamp())}"
             
+            # Заголовки против кэширования
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
+            
             logger.info(f"🔍 Запрос к API: {url}")
-            response = self.session.get(url, timeout=10)
+            response = self.session.get(url, headers=headers, timeout=10)
             
             if response.status_code != 200:
                 logger.warning(f"⚠️ API вернул статус {response.status_code}")
@@ -708,6 +747,16 @@ class GardenHorizonsBot:
             if data.get("ok") and "data" in data:
                 last_update = data["data"].get("lastGlobalUpdate", "no date")
                 logger.info(f"📅 Последнее обновление: {last_update}")
+                
+                # Логируем первые несколько предметов для отладки
+                seeds = data["data"].get("seeds", [])
+                if seeds:
+                    logger.info(f"🌱 Семена в стоке: {[(s['name'], s['quantity']) for s in seeds if s['quantity'] > 0]}")
+                
+                gear = data["data"].get("gear", [])
+                if gear:
+                    logger.info(f"⚙️ Снаряжение в стоке: {[(g['name'], g['quantity']) for g in gear if g['quantity'] > 0]}")
+                
                 return data["data"]
             
             logger.warning("⚠️ Неожиданная структура ответа API")

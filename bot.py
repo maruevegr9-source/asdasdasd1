@@ -11,7 +11,7 @@ from enum import Enum
 
 import requests
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto, ChatMember
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut
@@ -22,6 +22,10 @@ load_dotenv()
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808838893")
+REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "-1002808838893")  # ID канала для обязательной подписки
+REQUIRED_CHANNEL_LINK = os.getenv("REQUIRED_CHANNEL_LINK", "https://t.me/GardenHorizonsStocks")
+REQUIRED_CHANNEL_USERNAME = os.getenv("REQUIRED_CHANNEL_USERNAME", "@GardenHorizonsStocks")
+
 API_URL = os.getenv("API_URL", "https://garden-horizons-stock.dawidfc.workers.dev/api/stock")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "8"))
 ADMIN_ID = 8025951500
@@ -41,7 +45,7 @@ logger = logging.getLogger(__name__)
 IMAGE_MAIN = "https://i.postimg.cc/J4JdrN5z/image.png"
 IMAGE_SEEDS = "https://i.postimg.cc/pTf40Kcx/image.png"
 IMAGE_GEAR = "https://i.postimg.cc/GmMcKnTc/image.png"
-IMAGE_WEATHER = "https://i.postimg.cc/J4JdrN5z/image.png"  # Используем то же что и главное
+IMAGE_WEATHER = "https://i.postimg.cc/J4JdrN5z/image.png"
 
 # Ссылки
 DEFAULT_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
@@ -49,14 +53,13 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Файлы для хранения данных
-REQUIRED_CHANNEL_FILE = 'required_channel.json'
 CHANNELS_FILE = 'channels.json'
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
     "🌱 <b>Привет! Я могу отслеживать стоки в игре Garden Horizons, "
     "и отправлять их тебе, круто да? 🔥</b>\n\n"
-    f"<b>Наш канал</b> - {DEFAULT_CHANNEL_LINK}\n"
+    f"<b>Наш канал</b> - {REQUIRED_CHANNEL_LINK}\n"
     f"<b>Наш чат</b> - {CHAT_LINK}\n\n"
     "Выберите действие:"
 )
@@ -113,7 +116,6 @@ SPAM_PROTECTION_SECONDS = 20
 last_notification_time: Dict[int, datetime] = {}
 
 def translate(text: str) -> str:
-    """Перевод текста на русский"""
     return TRANSLATIONS.get(text, text)
 
 def is_rare(item_name: str) -> bool:
@@ -153,6 +155,7 @@ class UserSettings:
     seeds: Dict[str, ItemSettings] = field(default_factory=dict)
     gear: Dict[str, ItemSettings] = field(default_factory=dict)
     weather: Dict[str, ItemSettings] = field(default_factory=dict)
+    is_admin: bool = False  # Добавляем флаг админа
     
     def __post_init__(self):
         for seed in SEEDS_LIST:
@@ -164,6 +167,7 @@ class UserSettings:
         for weather in WEATHER_LIST:
             if weather not in self.weather:
                 self.weather[weather] = ItemSettings(enabled=True)
+        self.is_admin = (self.user_id == ADMIN_ID)
     
     def to_dict(self):
         return {
@@ -335,33 +339,7 @@ class GardenHorizonsBot:
             'Expires': '0'
         })
         
-        self.required_channel = self.load_required_channel()
         self.setup_handlers()
-    
-    def load_required_channel(self) -> Dict:
-        default = {
-            'id': "-1002808838893",
-            'link': "https://t.me/GardenHorizonsStocks",
-            'username': "@GardenHorizonsStocks"
-        }
-        try:
-            if os.path.exists(REQUIRED_CHANNEL_FILE):
-                with open(REQUIRED_CHANNEL_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return default
-        except:
-            return default
-    
-    def save_required_channel(self, channel_id: str, link: str = None, username: str = None):
-        data = {
-            'id': channel_id,
-            'link': link or f"https://t.me/c/{channel_id.replace('-100', '')}",
-            'username': username or channel_id
-        }
-        with open(REQUIRED_CHANNEL_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        self.required_channel = data
-        logger.info(f"✅ Обязательный канал обновлен: {channel_id}")
     
     def setup_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
@@ -369,24 +347,26 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))
         self.application.add_handler(CommandHandler("notifications_on", self.cmd_notifications_on))
         self.application.add_handler(CommandHandler("notifications_off", self.cmd_notifications_off))
-        self.application.add_handler(CommandHandler("admin", self.cmd_admin))
         self.application.add_handler(CommandHandler("mailing", self.cmd_mailing))
         self.application.add_handler(CommandHandler("setchannel", self.cmd_set_channel))
         self.application.add_handler(CommandHandler("addchannel", self.cmd_add_channel))
         self.application.add_handler(CommandHandler("channels", self.cmd_list_channels))
         self.application.add_handler(CommandHandler("testapi", self.cmd_test_api))
-        self.application.add_handler(CommandHandler("menu", self.cmd_menu))  # Быстрый возврат в меню
+        self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
     
-    async def check_subscription(self, user_id: int, channel_id: str = None) -> bool:
-        check_channel = channel_id or self.required_channel['id']
+    async def check_subscription(self, user_id: int) -> bool:
+        """Проверка подписки пользователя на обязательный канал"""
         try:
-            if not check_channel:
+            if not REQUIRED_CHANNEL_ID:
+                logger.error("REQUIRED_CHANNEL_ID не задан!")
                 return False
             
+            logger.info(f"🔍 Проверка подписки {user_id} на канал {REQUIRED_CHANNEL_ID}")
+            
             member = await self.application.bot.get_chat_member(
-                chat_id=int(check_channel),
+                chat_id=int(REQUIRED_CHANNEL_ID),
                 user_id=user_id
             )
             
@@ -397,27 +377,43 @@ class GardenHorizonsBot:
                 ChatMember.RESTRICTED
             ]
             
-            return member.status in valid_statuses
+            is_subscribed = member.status in valid_statuses
+            logger.info(f"✅ Результат проверки {user_id}: {member.status} -> {is_subscribed}")
+            
+            return is_subscribed
             
         except Exception as e:
             logger.error(f"❌ Ошибка проверки подписки {user_id}: {e}")
-            return False
+            # Если ошибка - считаем что пользователь подписан, чтобы не блокировать
+            return True
     
     async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Проверка подписки с обработкой исключений"""
         user = update.effective_user
-        is_subscribed = await self.check_subscription(user.id, self.required_channel['id'])
+        settings = self.user_manager.get_user(user.id)
+        
+        # Админа пропускаем без проверки
+        if settings.is_admin:
+            return True
+        
+        try:
+            is_subscribed = await self.check_subscription(user.id)
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка проверки подписки: {e}")
+            # В случае ошибки - пропускаем (чтобы бот работал)
+            return True
         
         if not is_subscribed:
             text = (
                 "🌱 <b>Привет! Я могу отслеживать стоки в игре, "
                 "и отправлять их тебе, круто да? 🔥</b>\n\n"
                 "❌ <b>Для использования бота необходимо подписаться на наш канал:</b>\n"
-                f"{self.required_channel['link']}\n\n"
+                f"{REQUIRED_CHANNEL_LINK}\n\n"
                 "После подписки нажми кнопку ниже 👇"
             )
             
             keyboard = [
-                [InlineKeyboardButton("📢 ПОДПИСАТЬСЯ", url=self.required_channel['link'])],
+                [InlineKeyboardButton("📢 ПОДПИСАТЬСЯ", url=REQUIRED_CHANNEL_LINK)],
                 [InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data="check_subscription")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -441,7 +437,7 @@ class GardenHorizonsBot:
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        self.user_manager.get_user(user.id, user.username or user.first_name)
+        settings = self.user_manager.get_user(user.id, user.username or user.first_name)
         
         if not await self.require_subscription(update, context):
             return
@@ -449,7 +445,6 @@ class GardenHorizonsBot:
         await self.show_main_menu(update)
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Быстрый возврат в главное меню"""
         if not await self.require_subscription(update, context):
             return
         await self.show_main_menu(update)
@@ -502,31 +497,11 @@ class GardenHorizonsBot:
         self.user_manager.save_users()
         await update.message.reply_html("<b>✅ Уведомления успешно выключены</b>")
     
-    async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        
-        if user.id != ADMIN_ID:
-            await update.message.reply_html("<b>❌ У вас нет прав!</b>")
-            return
-        
-        reply_keyboard = [
-            [KeyboardButton("📢 Рассылка пользователям")],
-            [KeyboardButton("📢 Рассылка в канал")],
-            [KeyboardButton("⚙️ Установить обязательный канал")],
-            [KeyboardButton("➕ Добавить канал для стоков")],
-            [KeyboardButton("📋 Список каналов")],
-            [KeyboardButton("🏠 ГЛАВНОЕ МЕНЮ")]
-        ]
-        reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
-        
-        text = "<b>👑 АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие на клавиатуре ниже:"
-        
-        await update.message.reply_html(text, reply_markup=reply_markup)
-    
     async def cmd_mailing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        settings = self.user_manager.get_user(user.id)
         
-        if user.id != ADMIN_ID:
+        if not settings.is_admin:
             await update.message.reply_html("<b>❌ У вас нет прав!</b>")
             return
         
@@ -558,42 +533,21 @@ class GardenHorizonsBot:
     
     async def cmd_set_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        settings = self.user_manager.get_user(user.id)
         
-        if user.id != ADMIN_ID:
+        if not settings.is_admin:
             await update.message.reply_html("<b>❌ У вас нет прав!</b>")
             return
         
-        if not context.args:
-            await update.message.reply_html(
-                "<b>⚙️ УСТАНОВКА ОБЯЗАТЕЛЬНОГО КАНАЛА</b>\n\n"
-                "Использование:\n"
-                "/setchannel CHANNEL_ID - установить ID канала\n"
-                "/setchannel CHANNEL_ID LINK - с ссылкой\n\n"
-                "Пример: /setchannel -1001234567890 https://t.me/mychannel"
-            )
-            return
-        
-        channel_id = context.args[0]
-        channel_link = context.args[1] if len(context.args) > 1 else None
-        
-        try:
-            chat = await self.application.bot.get_chat(chat_id=int(channel_id))
-            self.save_required_channel(channel_id, channel_link, chat.username)
-            
-            await update.message.reply_html(
-                f"<b>✅ Обязательный канал установлен!</b>\n\n"
-                f"ID: {channel_id}\n"
-                f"Название: {chat.title}"
-            )
-            
-        except Exception as e:
-            await update.message.reply_html(f"<b>❌ Ошибка: {e}</b>")
+        # Здесь можно добавить логику смены канала
+        await update.message.reply_html("<b>⚙️ Функция в разработке</b>")
     
     async def cmd_add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        settings = self.user_manager.get_user(user.id)
         
-        if user.id != ADMIN_ID:
-            await update.message.reply_html("<b>❌ Только для админа!</b>")
+        if not settings.is_admin:
+            await update.message.reply_html("<b>❌ У вас нет прав!</b>")
             return
         
         if not context.args:
@@ -632,15 +586,16 @@ class GardenHorizonsBot:
     
     async def cmd_list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        settings = self.user_manager.get_user(user.id)
         
-        if user.id != ADMIN_ID:
+        if not settings.is_admin:
             await update.message.reply_html("<b>❌ У вас нет прав!</b>")
             return
         
         text = f"<b>📋 КАНАЛЫ</b>\n\n"
         text += f"<b>Обязательный канал:</b>\n"
-        text += f"ID: {self.required_channel['id']}\n"
-        text += f"Ссылка: {self.required_channel['link']}\n\n"
+        text += f"ID: {REQUIRED_CHANNEL_ID}\n"
+        text += f"Ссылка: {REQUIRED_CHANNEL_LINK}\n\n"
         
         text += f"<b>Дополнительные каналы для стоков:</b>\n"
         if os.path.exists(CHANNELS_FILE):
@@ -662,7 +617,10 @@ class GardenHorizonsBot:
         await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def cmd_test_api(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != ADMIN_ID:
+        user = update.effective_user
+        settings = self.user_manager.get_user(user.id)
+        
+        if not settings.is_admin:
             await update.message.reply_html("<b>❌ Только для админа!</b>")
             return
         
@@ -688,88 +646,84 @@ class GardenHorizonsBot:
         await update.message.reply_html(msg, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка текстовых сообщений"""
         user = update.effective_user
+        settings = self.user_manager.get_user(user.id)
         text = update.message.text
         
-        if user.id != ADMIN_ID:
-            return
+        # Если админ - показываем админ-меню
+        if settings.is_admin:
+            if text == "👑 АДМИН-ПАНЕЛЬ":
+                await self.show_admin_panel(update)
+            elif text == "📢 Рассылка пользователям":
+                self.mailing_target = 'users'
+                await update.message.reply_html(
+                    "<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
+                    "Отправьте текст для рассылки:"
+                )
+            elif text == "📢 Рассылка в канал":
+                self.mailing_target = 'channel'
+                await update.message.reply_html(
+                    "<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
+                    "Отправьте текст для рассылки в канал:"
+                )
+            elif text == "➕ Добавить канал":
+                await update.message.reply_html(
+                    "<b>➕ ДОБАВЛЕНИЕ КАНАЛА</b>\n\n"
+                    "Отправьте ID канала в формате: -1001234567890"
+                )
+            elif text == "📋 Список каналов":
+                await self.cmd_list_channels(update, context)
+            elif text == "🔍 Тест API":
+                await self.cmd_test_api(update, context)
+            elif text == "🏠 ГЛАВНОЕ МЕНЮ":
+                await self.show_main_menu(update)
+            elif self.mailing_target:
+                self.mailing_text = text
+                
+                if self.mailing_target == 'users':
+                    target_text = f"<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
+                    target_count = len(self.user_manager.users)
+                else:
+                    target_text = f"<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
+                    target_count = 1
+                
+                confirm_text = (
+                    f"{target_text}"
+                    f"<b>Текст:</b>\n{self.mailing_text}\n\n"
+                    f"<b>Получателей:</b> {target_count}\n\n"
+                    f"Подтвердите:"
+                )
+                
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✅ ПОДТВЕРДИТЬ", callback_data="mailing_confirm"),
+                        InlineKeyboardButton("❌ ОТМЕНИТЬ", callback_data="mailing_cancel"),
+                        InlineKeyboardButton("🏠 МЕНЮ", callback_data="menu_main")
+                    ]
+                ]
+                
+                await update.message.reply_html(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard))
         
-        if text == "📢 Рассылка пользователям":
-            self.mailing_target = 'users'
-            await update.message.reply_html(
-                "<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
-                "Отправьте текст для рассылки:"
-            )
-        
-        elif text == "📢 Рассылка в канал":
-            self.mailing_target = 'channel'
-            await update.message.reply_html(
-                "<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
-                "Отправьте текст для рассылки в канал:"
-            )
-        
-        elif text == "⚙️ Установить обязательный канал":
-            await update.message.reply_html(
-                "<b>⚙️ УСТАНОВКА ОБЯЗАТЕЛЬНОГО КАНАЛА</b>\n\n"
-                "Отправьте ID канала в формате: -1001234567890\n"
-                "Или с ссылкой: -1001234567890 https://t.me/link"
-            )
-        
-        elif text == "➕ Добавить канал для стоков":
-            await update.message.reply_html(
-                "<b>➕ ДОБАВЛЕНИЕ КАНАЛА</b>\n\n"
-                "Отправьте ID канала в формате: -1001234567890"
-            )
-        
-        elif text == "📋 Список каналов":
-            await self.cmd_list_channels(update, context)
-        
+        # Для всех пользователей показываем главное меню
         elif text == "🏠 ГЛАВНОЕ МЕНЮ":
             await self.show_main_menu(update)
+    
+    async def show_admin_panel(self, update: Update):
+        """Показать админ-панель"""
+        reply_keyboard = [
+            [KeyboardButton("📢 Рассылка пользователям")],
+            [KeyboardButton("📢 Рассылка в канал")],
+            [KeyboardButton("➕ Добавить канал")],
+            [KeyboardButton("📋 Список каналов")],
+            [KeyboardButton("🔍 Тест API")],
+            [KeyboardButton("🏠 ГЛАВНОЕ МЕНЮ")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
         
-        elif self.mailing_target:
-            self.mailing_text = text
-            
-            if self.mailing_target == 'users':
-                target_text = f"<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
-                target_count = len(self.user_manager.users)
-            else:
-                target_text = f"<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
-                target_count = 1
-            
-            confirm_text = (
-                f"{target_text}"
-                f"<b>Текст:</b>\n{self.mailing_text}\n\n"
-                f"<b>Получателей:</b> {target_count}\n\n"
-                f"Подтвердите:"
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ ПОДТВЕРДИТЬ", callback_data="mailing_confirm"),
-                    InlineKeyboardButton("❌ ОТМЕНИТЬ", callback_data="mailing_cancel"),
-                    InlineKeyboardButton("🏠 МЕНЮ", callback_data="menu_main")
-                ]
-            ]
-            
-            await update.message.reply_html(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        text = "<b>👑 АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие на клавиатуре ниже:"
         
-        elif text.startswith('-100'):
-            parts = text.split()
-            channel_id = parts[0]
-            channel_link = parts[1] if len(parts) > 1 else None
-            
-            try:
-                chat = await self.application.bot.get_chat(chat_id=int(channel_id))
-                self.save_required_channel(channel_id, channel_link, chat.username)
-                
-                await update.message.reply_html(
-                    f"<b>✅ Обязательный канал установлен!</b>\n\n"
-                    f"ID: {channel_id}\n"
-                    f"Название: {chat.title}"
-                )
-            except Exception as e:
-                await update.message.reply_html(f"<b>❌ Ошибка: {e}</b>")
+        await update.message.reply_html(text, reply_markup=reply_markup)
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -778,18 +732,24 @@ class GardenHorizonsBot:
         user = update.effective_user
         settings = self.user_manager.get_user(user.id)
         
+        # Проверка подписки
         if query.data == "check_subscription":
-            is_subscribed = await self.check_subscription(user.id, self.required_channel['id'])
+            is_subscribed = await self.check_subscription(user.id)
             
             if is_subscribed:
                 await self.show_main_menu_callback(query)
             else:
+                text = (
+                    "❌ <b>Вы еще не подписались!</b>\n\n"
+                    f"Подпишитесь на канал {REQUIRED_CHANNEL_LINK} и нажмите кнопку еще раз."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("📢 ПОДПИСАТЬСЯ", url=REQUIRED_CHANNEL_LINK)],
+                    [InlineKeyboardButton("✅ ПРОВЕРИТЬ СНОВА", callback_data="check_subscription")]
+                ]
                 await query.edit_message_media(
-                    media=InputMediaPhoto(
-                        media=IMAGE_MAIN,
-                        caption="❌ <b>Вы еще не подписались!</b>",
-                        parse_mode='HTML'
-                    )
+                    media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             return
         
@@ -797,7 +757,7 @@ class GardenHorizonsBot:
             return
         
         if query.data == "mailing_confirm":
-            if user.id != ADMIN_ID:
+            if not settings.is_admin:
                 return
             
             await query.edit_message_caption(caption="<b>📧 Начинаю рассылку...</b>", parse_mode='HTML')
@@ -895,6 +855,11 @@ class GardenHorizonsBot:
             ]
         ]
         
+        # Добавляем кнопку админ-панели для админа
+        settings = self.user_manager.get_user(update.effective_user.id)
+        if settings.is_admin:
+            keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
+        
         await update.message.reply_photo(
             photo=IMAGE_MAIN,
             caption=MAIN_MENU_TEXT,
@@ -903,6 +868,9 @@ class GardenHorizonsBot:
         )
     
     async def show_main_menu_callback(self, query):
+        user = query.from_user
+        settings = self.user_manager.get_user(user.id)
+        
         keyboard = [
             [
                 InlineKeyboardButton("⚙️ АВТО-СТОК", callback_data="menu_settings"),
@@ -913,6 +881,10 @@ class GardenHorizonsBot:
                 InlineKeyboardButton("🔕 УВЕДОМЛЕНИЯ", callback_data="notifications_off")
             ]
         ]
+        
+        # Добавляем кнопку админ-панели для админа
+        if settings.is_admin:
+            keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
         
         await query.edit_message_media(
             media=InputMediaPhoto(
@@ -1196,7 +1168,7 @@ class GardenHorizonsBot:
     
     def format_channel_message(self, item_name: str, quantity: int, channel_link: str = None) -> str:
         translated = translate(item_name)
-        link = channel_link or self.required_channel['link']
+        link = channel_link or REQUIRED_CHANNEL_LINK
         
         return (
             f"✨ <b>{translated}</b>\n"
@@ -1369,7 +1341,7 @@ class GardenHorizonsBot:
                         notifications_sent = 0
                         for user_id, settings in self.user_manager.users.items():
                             if settings.notifications_enabled:
-                                is_subscribed = await self.check_subscription(user_id, self.required_channel['id'])
+                                is_subscribed = await self.check_subscription(user_id)
                                 
                                 if is_subscribed and can_send_notification(user_id):
                                     user_changes = self.get_user_changes(all_changes, settings)

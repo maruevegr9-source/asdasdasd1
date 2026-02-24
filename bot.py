@@ -2,25 +2,34 @@ import os
 import json
 import logging
 import asyncio
+import random
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass, field
 from collections import defaultdict
+from enum import Enum
 
 import requests
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter, TimedOut
 
 # Загружаем переменные окружения
 load_dotenv()
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = "-1002808838893"  # НОВЫЙ ID канала
+REQUIRED_CHANNEL_ID = "-1002808838893"  # ID канала для обязательной подписки
+REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
+REQUIRED_CHANNEL_USERNAME = "@GardenHorizonsStocks"
+
+# Основной канал для публикаций (можно менять через .env)
+MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808838893")
+
 API_URL = os.getenv("API_URL", "https://garden-horizons-stock.dawidfc.workers.dev/api/stock")
-UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "15"))
+UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))  # 10 секунд для быстрой отправки
 ADMIN_ID = 8025951500
 
 # Настройка логирования
@@ -38,6 +47,15 @@ logger = logging.getLogger(__name__)
 CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
+
+# Главное сообщение (то же, что и в /start)
+MAIN_MENU_TEXT = (
+    "🌱 <b>Привет! Я могу отслеживать стоки в игре Garden Horizons, "
+    "и отправлять их тебе, круто да? 🔥</b>\n\n"
+    f"<b>Наш канал</b> - {CHANNEL_LINK}\n"
+    f"<b>Наш чат</b> - {CHAT_LINK}\n\n"
+    "Выберите действие:"
+)
 
 # 🌱 ПОЛНЫЙ СЛОВАРЬ ПЕРЕВОДОВ
 TRANSLATIONS = {
@@ -75,7 +93,7 @@ TRANSLATIONS = {
     "starfall": "⭐ Звездопад"
 }
 
-# Список РАЗРЕШЕННЫХ растений для канала (ТОЛЬКО ЭТИ ТРИ!)
+# Список РАЗРЕШЕННЫХ растений для основного канала (ТОЛЬКО ЭТИ ТРИ!)
 ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry"]
 
 # Списки для удобства
@@ -86,6 +104,10 @@ WEATHER_LIST = ["fog", "rain", "snow", "storm", "sandstorm", "starfall"]
 # Редкие предметы
 RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall"]
 
+# Защита от спама (время между уведомлениями одному пользователю)
+SPAM_PROTECTION_SECONDS = 30
+last_notification_time: Dict[int, datetime] = {}
+
 def translate(text: str) -> str:
     """Перевод текста на русский"""
     return TRANSLATIONS.get(text, text)
@@ -94,9 +116,25 @@ def is_rare(item_name: str) -> bool:
     """Проверка, является ли предмет редким"""
     return item_name in RARE_ITEMS
 
-def is_allowed_for_channel(item_name: str) -> bool:
-    """Проверка, разрешен ли предмет для отправки в канал"""
+def is_allowed_for_main_channel(item_name: str) -> bool:
+    """Проверка, разрешен ли предмет для отправки в основной канал"""
     return item_name in ALLOWED_CHANNEL_ITEMS
+
+def can_send_notification(user_id: int) -> bool:
+    """Проверка защиты от спама"""
+    if user_id == ADMIN_ID:  # Админу можно всегда
+        return True
+    
+    last_time = last_notification_time.get(user_id)
+    if not last_time:
+        return True
+    
+    elapsed = (datetime.now() - last_time).total_seconds()
+    return elapsed >= SPAM_PROTECTION_SECONDS
+
+def update_last_notification(user_id: int):
+    """Обновление времени последнего уведомления"""
+    last_notification_time[user_id] = datetime.now()
 
 @dataclass
 class ItemSettings:
@@ -195,6 +233,73 @@ class UserManager:
     def get_all_users(self) -> List[int]:
         return list(self.users.keys())
 
+class MessageQueue:
+    """Очередь сообщений для избежания флуда и быстрой отправки"""
+    def __init__(self, delay: float = 0.05):  # 50ms между сообщениями
+        self.queue = asyncio.Queue()
+        self.delay = delay
+        self._task = None
+    
+    async def start(self):
+        self._task = asyncio.create_task(self._worker())
+    
+    async def stop(self):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+    
+    async def _worker(self):
+        while True:
+            try:
+                chat_id, text, parse_mode = await self.queue.get()
+                try:
+                    await self._send_with_retry(chat_id, text, parse_mode)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки в {chat_id}: {e}")
+                finally:
+                    self.queue.task_done()
+                    await asyncio.sleep(self.delay)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Ошибка в очереди: {e}")
+                await asyncio.sleep(1)
+    
+    async def _send_with_retry(self, chat_id: int, text: str, parse_mode: str, max_retries: int = 3):
+        """Отправка с повторными попытками при ошибках"""
+        from telegram.ext import Application
+        
+        for attempt in range(max_retries):
+            try:
+                # Получаем доступ к боту через глобальный экземпляр приложения
+                bot_app = Application.bot()
+                await bot_app.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=True
+                )
+                return
+            except RetryAfter as e:
+                wait_time = e.retry_after
+                logger.warning(f"Flood control, waiting {wait_time}s")
+                await asyncio.sleep(wait_time)
+            except TimedOut:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Timeout, retrying {attempt + 1}/{max_retries}")
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    raise
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Error {e}, retrying {attempt + 1}/{max_retries}")
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    raise
+
 class GardenHorizonsBot:
     def __init__(self, token: str):
         self.token = token
@@ -202,6 +307,7 @@ class GardenHorizonsBot:
         self.user_manager = UserManager()
         self.last_data: Optional[Dict] = None
         self.mailing_text: Optional[str] = None
+        self.message_queue = MessageQueue(delay=0.05)  # 50ms для быстрой отправки
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -220,18 +326,20 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("notifications_on", self.cmd_notifications_on))
         self.application.add_handler(CommandHandler("notifications_off", self.cmd_notifications_off))
         self.application.add_handler(CommandHandler("mailing", self.cmd_mailing))
-        self.application.add_handler(CommandHandler("testapi", self.cmd_test_api))  # Новая тестовая команда
+        self.application.add_handler(CommandHandler("testapi", self.cmd_test_api))
+        self.application.add_handler(CommandHandler("addchannel", self.cmd_add_channel))  # Добавление канала
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
     
-    async def check_subscription(self, user_id: int) -> bool:
-        """Проверка подписки ТОЛЬКО по числовому ID канала"""
+    async def check_subscription(self, user_id: int, channel_id: str = None) -> bool:
+        """Проверка подписки пользователя на указанный канал"""
+        check_channel = channel_id or REQUIRED_CHANNEL_ID
         try:
-            if not CHANNEL_ID:
-                logger.error("CHANNEL_ID не задан!")
+            if not check_channel:
+                logger.error("Channel ID не задан!")
                 return False
             
             member = await self.application.bot.get_chat_member(
-                chat_id=int(CHANNEL_ID),
+                chat_id=int(check_channel),
                 user_id=user_id
             )
             
@@ -243,7 +351,7 @@ class GardenHorizonsBot:
             ]
             
             is_subscribed = member.status in valid_statuses
-            logger.info(f"Проверка подписки {user_id}: {member.status} -> {is_subscribed}")
+            logger.info(f"Проверка подписки {user_id} на {check_channel}: {member.status} -> {is_subscribed}")
             
             return is_subscribed
             
@@ -252,21 +360,23 @@ class GardenHorizonsBot:
             return False
     
     async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        """Универсальная проверка подписки"""
+        """Универсальная проверка подписки на ОСНОВНОЙ канал"""
         user = update.effective_user
         
-        is_subscribed = await self.check_subscription(user.id)
+        # Проверяем подписку на обязательный канал
+        is_subscribed = await self.check_subscription(user.id, REQUIRED_CHANNEL_ID)
         
         if not is_subscribed:
             text = (
-                "🌱 <b>Добро пожаловать в Garden Horizons Stock Bot!</b> 🌱\n\n"
+                "🌱 <b>Привет! Я могу отслеживать стоки в игре, "
+                "и отправлять их тебе, круто да? 🔥</b>\n\n"
                 "❌ <b>Для использования бота необходимо подписаться на наш канал:</b>\n"
-                f"{CHANNEL_LINK}\n\n"
+                f"{REQUIRED_CHANNEL_LINK}\n\n"
                 "После подписки нажми кнопку ниже 👇"
             )
             
             keyboard = [
-                [InlineKeyboardButton("📢 ПОДПИСАТЬСЯ НА КАНАЛ", url=CHANNEL_LINK)],
+                [InlineKeyboardButton("📢 ПОДПИСАТЬСЯ НА КАНАЛ", url=REQUIRED_CHANNEL_LINK)],
                 [InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data="check_subscription")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -401,6 +511,51 @@ class GardenHorizonsBot:
         
         await update.message.reply_html(msg)
     
+    async def cmd_add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Добавление канала для публикации стоков (только админ)"""
+        user = update.effective_user
+        
+        if user.id != ADMIN_ID:
+            await update.message.reply_html("<b>❌ Только для админа!</b>")
+            return
+        
+        if not context.args:
+            await update.message.reply_html(
+                "<b>📢 ДОБАВЛЕНИЕ КАНАЛА</b>\n\n"
+                "Использование: /addchannel CHANNEL_ID\n\n"
+                "Пример: /addchannel -1001234567890"
+            )
+            return
+        
+        try:
+            channel_id = context.args[0]
+            # Проверяем, что бот админ в канале
+            chat = await self.application.bot.get_chat(chat_id=int(channel_id))
+            
+            # Сохраняем канал в файл
+            channels_file = 'channels.json'
+            channels = []
+            if os.path.exists(channels_file):
+                with open(channels_file, 'r') as f:
+                    channels = json.load(f)
+            
+            if channel_id not in channels:
+                channels.append(channel_id)
+                with open(channels_file, 'w') as f:
+                    json.dump(channels, f)
+                
+                await update.message.reply_html(
+                    f"<b>✅ Канал добавлен!</b>\n\n"
+                    f"ID: {channel_id}\n"
+                    f"Название: {chat.title}\n"
+                    f"Теперь бот будет отправлять стоки и туда."
+                )
+            else:
+                await update.message.reply_html("<b>❌ Канал уже добавлен!</b>")
+                
+        except Exception as e:
+            await update.message.reply_html(f"<b>❌ Ошибка: {e}</b>")
+    
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -410,7 +565,7 @@ class GardenHorizonsBot:
         
         # Специальные callback без проверки подписки
         if query.data == "check_subscription":
-            is_subscribed = await self.check_subscription(user.id)
+            is_subscribed = await self.check_subscription(user.id, REQUIRED_CHANNEL_ID)
             
             if is_subscribed:
                 await self.show_main_menu_callback(query)
@@ -437,13 +592,12 @@ class GardenHorizonsBot:
             
             for uid in self.user_manager.get_all_users():
                 try:
-                    await self.application.bot.send_message(
-                        chat_id=uid,
-                        text=f"<b>📢 РАССЫЛКА</b>\n\n{self.mailing_text}",
-                        parse_mode='HTML'
-                    )
+                    await self.message_queue.queue.put((
+                        uid,
+                        f"<b>📢 РАССЫЛКА</b>\n\n{self.mailing_text}",
+                        'HTML'
+                    ))
                     success += 1
-                    await asyncio.sleep(0.05)
                 except Exception as e:
                     failed += 1
                     failed_users.append(uid)
@@ -510,13 +664,6 @@ class GardenHorizonsBot:
             await self.handle_weather_callback(query, settings)
     
     async def show_main_menu(self, update: Update):
-        text = (
-            "🌱 <b>Добро пожаловать в Garden Horizons Stock Bot!</b> 🌱\n\n"
-            f"<b>Канал</b> - {CHANNEL_LINK}\n"
-            f"<b>Чат</b> - {CHAT_LINK}\n\n"
-            "Выберите действие:"
-        )
-        
         keyboard = [
             [
                 InlineKeyboardButton("⚙️ АВТО-СТОК", callback_data="menu_settings"),
@@ -528,16 +675,9 @@ class GardenHorizonsBot:
             ]
         ]
         
-        await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_html(MAIN_MENU_TEXT, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_main_menu_callback(self, query):
-        text = (
-            "🌱 <b>Добро пожаловать в Garden Horizons Stock Bot!</b> 🌱\n\n"
-            f"<b>Канал</b> - {CHANNEL_LINK}\n"
-            f"<b>Чат</b> - {CHAT_LINK}\n\n"
-            "Выберите действие:"
-        )
-        
         keyboard = [
             [
                 InlineKeyboardButton("⚙️ АВТО-СТОК", callback_data="menu_settings"),
@@ -550,7 +690,7 @@ class GardenHorizonsBot:
         ]
         
         await query.edit_message_text(
-            text=text,
+            text=MAIN_MENU_TEXT,
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -719,13 +859,14 @@ class GardenHorizonsBot:
             )
     
     def fetch_api_data(self, force=False) -> Optional[Dict]:
-        """Получение данных из API с подробным логированием и анти-кэш заголовками"""
+        """Получение данных из API с анти-кэш заголовками"""
         try:
-            url = API_URL
+            # Добавляем случайное число для гарантии
+            rand = random.randint(1000, 9999)
+            url = f"{API_URL}?r={rand}"
             if force:
-                url = f"{API_URL}?t={int(datetime.now().timestamp())}"
+                url = f"{API_URL}?t={int(datetime.now().timestamp())}&r={rand}"
             
-            # Заголовки против кэширования
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'application/json',
@@ -748,14 +889,16 @@ class GardenHorizonsBot:
                 last_update = data["data"].get("lastGlobalUpdate", "no date")
                 logger.info(f"📅 Последнее обновление: {last_update}")
                 
-                # Логируем первые несколько предметов для отладки
+                # Логируем текущий сток
                 seeds = data["data"].get("seeds", [])
                 if seeds:
-                    logger.info(f"🌱 Семена в стоке: {[(s['name'], s['quantity']) for s in seeds if s['quantity'] > 0]}")
+                    seeds_in_stock = [(s['name'], s['quantity']) for s in seeds if s['quantity'] > 0]
+                    logger.info(f"🌱 Семена в стоке: {seeds_in_stock}")
                 
                 gear = data["data"].get("gear", [])
                 if gear:
-                    logger.info(f"⚙️ Снаряжение в стоке: {[(g['name'], g['quantity']) for g in gear if g['quantity'] > 0]}")
+                    gear_in_stock = [(g['name'], g['quantity']) for g in gear if g['quantity'] > 0]
+                    logger.info(f"⚙️ Снаряжение в стоке: {gear_in_stock}")
                 
                 return data["data"]
             
@@ -767,6 +910,7 @@ class GardenHorizonsBot:
             return None
     
     def format_stock_message(self, data: Dict) -> Optional[str]:
+        """Форматирование сообщения о текущем стоке"""
         parts = []
         
         if "seeds" in data:
@@ -794,15 +938,16 @@ class GardenHorizonsBot:
         
         return "\n\n".join(parts) if parts else None
     
-    def format_channel_message(self, item_name: str, quantity: int) -> str:
+    def format_channel_message(self, item_name: str, quantity: int, channel_link: str = None) -> str:
         """Форматирование сообщения для канала"""
         translated = translate(item_name)
+        link = channel_link or CHANNEL_LINK
         
         return (
             f"✨ <b>{translated}</b>\n"
             f"<b>Количество:</b> {quantity} шт.\n"
             f"━━━━━━━━━━━━━━\n"
-            f"<a href='{CHANNEL_LINK}'>Наш канал</a> | <a href='{BOT_LINK}'>Авто-сток</a> | <a href='{CHAT_LINK}'>Наш чат</a>\n"
+            f"<a href='{link}'>Наш канал</a> | <a href='{BOT_LINK}'>Авто-сток</a> | <a href='{CHAT_LINK}'>Наш чат</a>\n"
             f"━━━━━━━━━━━━━━\n"
             f"👀 Включи уведомления в канале!"
         )
@@ -823,12 +968,11 @@ class GardenHorizonsBot:
     def get_changed_items(self, old_data: Dict, new_data: Dict) -> Dict[str, int]:
         """
         Получить УНИКАЛЬНЫЕ изменения между старыми и новыми данными
-        Возвращает словарь {название: общее_количество}
         """
         changed_items = defaultdict(int)
         processed = set()
         
-        # Проверяем семена
+        # Проверяем семена - все изменения
         if "seeds" in new_data:
             old_seeds = {s["name"]: s["quantity"] for s in old_data.get("seeds", [])}
             new_seeds = {s["name"]: s["quantity"] for s in new_data["seeds"]}
@@ -841,11 +985,13 @@ class GardenHorizonsBot:
                     continue
                 
                 old_q = old_seeds.get(name, 0)
-                if old_q != quantity and quantity > 0 and old_q == 0:
-                    changed_items[name] += quantity
+                if old_q != quantity and quantity > 0:
+                    # Любое изменение (появление, увеличение, уменьшение)
+                    diff = quantity - old_q
+                    changed_items[name] = diff
                     processed.add(name)
         
-        # Проверяем снаряжение
+        # Проверяем снаряжение - все изменения
         if "gear" in new_data:
             old_gear = {g["name"]: g["quantity"] for g in old_data.get("gear", [])}
             new_gear = {g["name"]: g["quantity"] for g in new_data["gear"]}
@@ -858,11 +1004,12 @@ class GardenHorizonsBot:
                     continue
                 
                 old_q = old_gear.get(name, 0)
-                if old_q != quantity and quantity > 0 and old_q == 0:
-                    changed_items[name] += quantity
+                if old_q != quantity and quantity > 0:
+                    diff = quantity - old_q
+                    changed_items[name] = diff
                     processed.add(name)
         
-        # Проверяем погоду
+        # Проверяем погоду - только начало
         if "weather" in new_data:
             old_weather = old_data.get("weather", {})
             new_weather = new_data["weather"]
@@ -870,7 +1017,7 @@ class GardenHorizonsBot:
             wtype = new_weather.get("type")
             if wtype and wtype not in processed and wtype in TRANSLATIONS:
                 if new_weather.get("active") and not old_weather.get("active"):
-                    changed_items[wtype] += 1
+                    changed_items[wtype] = 1
                     processed.add(wtype)
         
         return dict(changed_items)
@@ -882,7 +1029,7 @@ class GardenHorizonsBot:
         user_items = []
         processed = set()
         
-        # Проверяем семена
+        # Проверяем семена - все изменения
         if "seeds" in new_data:
             old_seeds = {s["name"]: s["quantity"] for s in old_data.get("seeds", [])}
             new_seeds = {s["name"]: s["quantity"] for s in new_data["seeds"]}
@@ -897,11 +1044,12 @@ class GardenHorizonsBot:
                     continue
                 
                 old_q = old_seeds.get(name, 0)
-                if old_q != quantity and quantity > 0 and old_q == 0:
-                    user_items.append((name, quantity))
+                if old_q != quantity and quantity > 0:
+                    diff = quantity - old_q
+                    user_items.append((name, diff))
                     processed.add(name)
         
-        # Проверяем снаряжение
+        # Проверяем снаряжение - все изменения
         if "gear" in new_data:
             old_gear = {g["name"]: g["quantity"] for g in old_data.get("gear", [])}
             new_gear = {g["name"]: g["quantity"] for g in new_data["gear"]}
@@ -916,11 +1064,12 @@ class GardenHorizonsBot:
                     continue
                 
                 old_q = old_gear.get(name, 0)
-                if old_q != quantity and quantity > 0 and old_q == 0:
-                    user_items.append((name, quantity))
+                if old_q != quantity and quantity > 0:
+                    diff = quantity - old_q
+                    user_items.append((name, diff))
                     processed.add(name)
         
-        # Проверяем погоду
+        # Проверяем погоду - только начало
         if "weather" in new_data:
             old_weather = old_data.get("weather", {})
             new_weather = new_data["weather"]
@@ -935,13 +1084,20 @@ class GardenHorizonsBot:
         return user_items
     
     async def monitor_loop(self):
-        """Основной цикл мониторинга"""
+        """Основной цикл мониторинга - максимально быстрый"""
         logger.info("🚀 Запущен цикл мониторинга API")
+        
+        # Загружаем список дополнительных каналов
+        channels_file = 'channels.json'
+        additional_channels = []
+        if os.path.exists(channels_file):
+            with open(channels_file, 'r') as f:
+                additional_channels = json.load(f)
         
         while True:
             try:
                 start_time = datetime.now()
-                logger.info("🔄 Проверка API...")
+                logger.info("🔄 Быстрая проверка API...")
                 new_data = self.fetch_api_data(force=True)
                 
                 if new_data:
@@ -952,59 +1108,90 @@ class GardenHorizonsBot:
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
                         logger.info(f"✅ Обнаружены изменения: {new_data.get('lastGlobalUpdate')}")
                         
-                        # 1. ПОЛУЧАЕМ УНИКАЛЬНЫЕ ИЗМЕНЕНИЯ
+                        # 1. ПОЛУЧАЕМ ВСЕ ИЗМЕНЕНИЯ
                         all_changes = self.get_changed_items(self.last_data, new_data)
                         logger.info(f"📦 Всего изменений: {len(all_changes)}")
                         
-                        # 2. ФИЛЬТРУЕМ ТОЛЬКО РАЗРЕШЕННЫЕ ПРЕДМЕТЫ ДЛЯ КАНАЛА
-                        channel_changes = {}
-                        for name, qty in all_changes.items():
-                            if is_allowed_for_channel(name):
-                                channel_changes[name] = qty
+                        # 2. ФИЛЬТРУЕМ ДЛЯ ОСНОВНОГО КАНАЛА
+                        main_channel_changes = {}
+                        for name, diff in all_changes.items():
+                            if is_allowed_for_main_channel(name):
+                                main_channel_changes[name] = diff
                         
-                        # Отправляем в канал ТОЛЬКО разрешенные предметы
-                        if CHANNEL_ID and channel_changes:
-                            logger.info(f"📢 Отправка {len(channel_changes)} разрешенных предметов в канал")
+                        # 3. Отправляем в ОСНОВНОЙ канал
+                        if MAIN_CHANNEL_ID and main_channel_changes:
+                            logger.info(f"📢 Отправка {len(main_channel_changes)} в основной канал")
                             
-                            for name, total_qty in channel_changes.items():
-                                channel_message = self.format_channel_message(name, total_qty)
+                            for name, diff in main_channel_changes.items():
+                                # Для канала показываем текущее количество
+                                current_qty = 0
+                                for item in new_data.get("seeds", []):
+                                    if item["name"] == name:
+                                        current_qty = item["quantity"]
+                                        break
+                                
+                                channel_message = self.format_channel_message(name, current_qty)
                                 try:
-                                    await self.application.bot.send_message(
-                                        chat_id=int(CHANNEL_ID),
-                                        text=channel_message,
-                                        parse_mode='HTML',
-                                        disable_web_page_preview=True
-                                    )
-                                    logger.info(f"✅ В канал отправлено: {name} x{total_qty}")
-                                    await asyncio.sleep(0.5)
+                                    await self.message_queue.queue.put((
+                                        int(MAIN_CHANNEL_ID),
+                                        channel_message,
+                                        'HTML'
+                                    ))
+                                    logger.info(f"✅ В основной канал: {name}")
                                 except Exception as e:
-                                    logger.error(f"❌ Ошибка отправки в канал: {e}")
+                                    logger.error(f"❌ Ошибка основного канала: {e}")
                         
-                        # 3. Отправляем персональные уведомления пользователям (без ограничений)
+                        # 4. Отправляем в дополнительные каналы
+                        if additional_channels:
+                            for channel_id in additional_channels:
+                                try:
+                                    for name, diff in main_channel_changes.items():
+                                        current_qty = 0
+                                        for item in new_data.get("seeds", []):
+                                            if item["name"] == name:
+                                                current_qty = item["quantity"]
+                                                break
+                                        
+                                        channel_message = self.format_channel_message(name, current_qty)
+                                        await self.message_queue.queue.put((
+                                            int(channel_id),
+                                            channel_message,
+                                            'HTML'
+                                        ))
+                                    logger.info(f"✅ В доп. канал {channel_id}: {len(main_channel_changes)}")
+                                except Exception as e:
+                                    logger.error(f"❌ Ошибка доп. канала {channel_id}: {e}")
+                        
+                        # 5. Отправляем персональные уведомления пользователям
                         notifications_sent = 0
                         for user_id, settings in self.user_manager.users.items():
                             if settings.notifications_enabled:
-                                is_subscribed = await self.check_subscription(user_id)
+                                # Проверяем подписку
+                                is_subscribed = await self.check_subscription(user_id, REQUIRED_CHANNEL_ID)
                                 
                                 if is_subscribed:
-                                    user_changes = self.get_user_changed_items(
-                                        self.last_data, new_data, settings
-                                    )
-                                    
-                                    if user_changes:
-                                        pm_message = self.format_pm_message(user_changes)
-                                        if pm_message:
-                                            try:
-                                                await self.application.bot.send_message(
-                                                    chat_id=user_id,
-                                                    text=pm_message,
-                                                    parse_mode='HTML'
-                                                )
-                                                notifications_sent += 1
-                                                logger.info(f"✅ Уведомление отправлено {user_id}")
-                                                await asyncio.sleep(0.1)
-                                            except Exception as e:
-                                                logger.error(f"❌ Ошибка отправки {user_id}: {e}")
+                                    # Проверяем защиту от спама
+                                    if can_send_notification(user_id):
+                                        user_changes = self.get_user_changed_items(
+                                            self.last_data, new_data, settings
+                                        )
+                                        
+                                        if user_changes:
+                                            pm_message = self.format_pm_message(user_changes)
+                                            if pm_message:
+                                                try:
+                                                    await self.message_queue.queue.put((
+                                                        user_id,
+                                                        pm_message,
+                                                        'HTML'
+                                                    ))
+                                                    notifications_sent += 1
+                                                    update_last_notification(user_id)
+                                                    logger.info(f"✅ Уведомление {user_id}")
+                                                except Exception as e:
+                                                    logger.error(f"❌ Ошибка {user_id}: {e}")
+                                    else:
+                                        logger.info(f"⏱️ Спам-защита для {user_id}")
                         
                         if notifications_sent > 0:
                             logger.info(f"📨 Отправлено уведомлений: {notifications_sent}")
@@ -1014,11 +1201,11 @@ class GardenHorizonsBot:
                 elif new_data and not self.last_data:
                     # Первый запуск
                     self.last_data = new_data
-                    logger.info(f"✅ Получены первые данные: {new_data.get('lastGlobalUpdate')}")
+                    logger.info(f"✅ Первые данные: {new_data.get('lastGlobalUpdate')}")
                 
+                # Минимальная задержка для быстрого реагирования
                 elapsed = (datetime.now() - start_time).total_seconds()
-                sleep_time = max(1, UPDATE_INTERVAL - elapsed)
-                logger.info(f"⏱️ Следующая проверка через {sleep_time} сек")
+                sleep_time = max(2, UPDATE_INTERVAL - elapsed)  # Минимум 2 секунды
                 await asyncio.sleep(sleep_time)
                 
             except Exception as e:
@@ -1034,6 +1221,10 @@ class GardenHorizonsBot:
         else:
             logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
+        # Запускаем очередь сообщений
+        await self.message_queue.start()
+        
+        # Запускаем мониторинг
         asyncio.create_task(self.monitor_loop())
         
         await self.application.initialize()
@@ -1041,8 +1232,9 @@ class GardenHorizonsBot:
         
         logger.info("🤖 Бот запущен")
         logger.info(f"📡 API: {API_URL}")
-        logger.info(f"📱 Канал: {CHANNEL_ID}")
+        logger.info(f"📱 Основной канал: {MAIN_CHANNEL_ID}")
         logger.info(f"👑 Админ: {ADMIN_ID}")
+        logger.info(f"⏱️ Интервал: {UPDATE_INTERVAL} сек")
         
         await self.application.updater.start_polling()
         

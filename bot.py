@@ -669,7 +669,6 @@ class GardenHorizonsBot:
             f"📢 Каналов для постинга: {len(self.posting_channels)}"
         )
         
-        # ✅ ИСПРАВЛЕНО: edit_message_caption вместо edit_message_text
         await query.edit_message_caption(
             caption=text,
             parse_mode='HTML',
@@ -985,7 +984,6 @@ class GardenHorizonsBot:
                 f"⏱️ Интервал проверки: {UPDATE_INTERVAL} сек"
             )
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
-            # ✅ ИСПРАВЛЕНО: edit_message_caption
             await query.edit_message_caption(
                 caption=stats_text,
                 parse_mode='HTML',
@@ -1004,7 +1002,6 @@ class GardenHorizonsBot:
                 for ch in self.required_channels_list:
                     text += f"• {ch['name']} (ID: {ch['id']})\n"
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
-            # ✅ ИСПРАВЛЕНО: edit_message_caption
             await query.edit_message_caption(
                 caption=text,
                 parse_mode='HTML',
@@ -1023,12 +1020,26 @@ class GardenHorizonsBot:
                 for ch in self.posting_channels:
                     text += f"• {ch['name']} (ID: {ch['id']})\n"
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
-            # ✅ ИСПРАВЛЕНО: edit_message_caption
             await query.edit_message_caption(
                 caption=text,
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            return
+        
+        # Управление ОП (эти callback уже обработаны выше)
+        if query.data in ["add_channel", "remove_channel"]:
+            # Эти обрабатываются ConversationHandler
+            return
+        
+        # Управление постингом
+        if query.data in ["add_post_channel", "remove_post_channel"]:
+            # Эти обрабатываются ConversationHandler
+            return
+        
+        # Рассылка
+        if query.data == "mailing":
+            # Обрабатывается ConversationHandler
             return
         
         # Основное меню

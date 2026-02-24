@@ -20,6 +20,17 @@ from telegram.error import RetryAfter, TimedOut
 # Загружаем переменные окружения
 load_dotenv()
 
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ (В САМОМ НАЧАЛЕ!) ==========
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808838893")
@@ -36,17 +47,6 @@ if os.environ.get('RAILWAY_ENVIRONMENT'):
 else:
     DB_PATH = "bot.db"
     logger.info("✅ Локальная разработка, БД в bot.db")
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 # URL изображений
 IMAGE_MAIN = "https://i.postimg.cc/J4JdrN5z/image.png"
@@ -211,6 +211,7 @@ def add_user_to_db(user_id: int, username: str = ""):
     
     conn.commit()
     conn.close()
+    logger.info(f"✅ Пользователь {user_id} ({username}) добавлен/обновлен в БД")
 
 def get_user_settings(user_id: int) -> Dict:
     """Получает настройки пользователя из БД"""
@@ -303,6 +304,7 @@ def add_required_channel(channel_id: str, name: str, link: str):
     )
     conn.commit()
     conn.close()
+    logger.info(f"✅ Канал ОП добавлен: {name} ({channel_id})")
 
 def remove_required_channel(channel_id: str):
     """Удаляет канал из обязательной подписки"""
@@ -311,6 +313,7 @@ def remove_required_channel(channel_id: str):
     cur.execute("DELETE FROM required_channels WHERE channel_id = ?", (channel_id,))
     conn.commit()
     conn.close()
+    logger.info(f"✅ Канал ОП удален: {channel_id}")
 
 # ----- КАНАЛЫ ДЛЯ АВТОПОСТИНГА -----
 
@@ -336,6 +339,7 @@ def add_posting_channel(channel_id: str, name: str, username: str = None):
     )
     conn.commit()
     conn.close()
+    logger.info(f"✅ Канал автопостинга добавлен: {name} ({channel_id})")
 
 def remove_posting_channel(channel_id: str):
     """Удаляет канал из автопостинга"""
@@ -344,6 +348,7 @@ def remove_posting_channel(channel_id: str):
     cur.execute("DELETE FROM posting_channels WHERE channel_id = ?", (channel_id,))
     conn.commit()
     conn.close()
+    logger.info(f"✅ Канал автопостинга удален: {channel_id}")
 
 # ----- ОТПРАВЛЕННЫЕ УВЕДОМЛЕНИЯ -----
 
@@ -412,13 +417,17 @@ def get_stats() -> Dict:
     cur.execute("SELECT COUNT(*) FROM sent_items")
     sent_count = cur.fetchone()[0]
     
+    cur.execute("SELECT COUNT(*) FROM user_updates")
+    updates_count = cur.fetchone()[0]
+    
     conn.close()
     
     return {
         'users': users_count,
         'op_channels': op_count,
         'posting_channels': post_count,
-        'sent_notifications': sent_count
+        'sent_notifications': sent_count,
+        'user_updates': updates_count
     }
 
 # ========== КЛАССЫ ==========
@@ -496,7 +505,7 @@ class UserManager:
         user_ids = get_all_users()
         for user_id in user_ids:
             self.users[user_id] = UserSettings(user_id)
-        logger.info(f"📥 Загружено {len(self.users)} пользователей")
+        logger.info(f"📥 Загружено {len(self.users)} пользователей из БД")
     
     def get_user(self, user_id: int, username: str = "") -> UserSettings:
         if user_id not in self.users:
@@ -511,6 +520,10 @@ class UserManager:
     
     def get_all_users(self) -> List[int]:
         return list(self.users.keys())
+    
+    def save_users(self):
+        """Сохраняет всех пользователей (для совместимости)"""
+        pass
 
 class MessageQueue:
     def __init__(self, delay: float = 0.1):

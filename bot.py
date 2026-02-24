@@ -34,6 +34,7 @@ REQUIRED_CHANNEL_FILE = 'required_channel.json'
 CHANNELS_FILE = 'channels.json'
 USERS_FILE = 'users.json'
 SENT_ITEMS_FILE = 'sent_items.json'
+REQUIRED_CHANNELS_LIST_FILE = 'required_channels_list.json'
 
 # Настройка логирования
 logging.basicConfig(
@@ -113,17 +114,16 @@ def save_required_channel(channel_id: str, channel_link: str, channel_name: str 
     logger.info(f"✅ Обязательный канал сохранен: {channel_name} ({channel_id})")
 
 def load_required_channels_list():
-    """Загрузка списка обязательных каналов (для управления)"""
     try:
-        if os.path.exists('required_channels_list.json'):
-            with open('required_channels_list.json', 'r', encoding='utf-8') as f:
+        if os.path.exists(REQUIRED_CHANNELS_LIST_FILE):
+            with open(REQUIRED_CHANNELS_LIST_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except Exception as e:
         logger.error(f"Ошибка загрузки списка каналов: {e}")
     return []
 
 def save_required_channels_list(channels: list):
-    with open('required_channels_list.json', 'w', encoding='utf-8') as f:
+    with open(REQUIRED_CHANNELS_LIST_FILE, 'w', encoding='utf-8') as f:
         json.dump(channels, f, ensure_ascii=False, indent=2)
 
 def load_channels():
@@ -669,7 +669,12 @@ class GardenHorizonsBot:
             f"📢 Каналов для постинга: {len(self.posting_channels)}"
         )
         
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        # ✅ ИСПРАВЛЕНО: edit_message_caption вместо edit_message_text
+        await query.edit_message_caption(
+            caption=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     # ========== ОБРАБОТЧИКИ ДИАЛОГОВ ==========
     
@@ -678,11 +683,11 @@ class GardenHorizonsBot:
         query = update.callback_query
         await query.answer()
         if query.from_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
-        await query.edit_message_text(
-            "📢 <b>Добавление канала в обязательную подписку</b>\n\n"
-            "Отправьте ID канала (например: -1001234567890) или username (@channel):",
+        
+        await query.edit_message_caption(
+            caption="📢 <b>Добавление канала в обязательную подписку</b>\n\nОтправьте ID канала (например: -1001234567890) или username (@channel):",
             parse_mode='HTML'
         )
         return ADD_CHANNEL_ID
@@ -737,11 +742,11 @@ class GardenHorizonsBot:
         query = update.callback_query
         await query.answer()
         if query.from_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
         
         if not self.required_channels_list:
-            await query.edit_message_text("📭 Нет каналов для удаления")
+            await query.edit_message_caption(caption="📭 Нет каналов для удаления")
             await self.show_admin_panel_callback(query)
             return ConversationHandler.END
         
@@ -750,8 +755,8 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"del_channel_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
         
-        await query.edit_message_text(
-            "🗑 <b>Выберите канал для удаления из обязательной подписки:</b>",
+        await query.edit_message_caption(
+            caption="🗑 <b>Выберите канал для удаления из обязательной подписки:</b>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -763,7 +768,7 @@ class GardenHorizonsBot:
         channel_id = query.data.replace('del_channel_', '')
         self.required_channels_list = [ch for ch in self.required_channels_list if ch['id'] != channel_id]
         save_required_channels_list(self.required_channels_list)
-        await query.edit_message_text("✅ Канал удален из обязательной подписки!")
+        await query.edit_message_caption(caption="✅ Канал удален из обязательной подписки!")
         await self.show_admin_panel_callback(query)
         return ConversationHandler.END
     
@@ -772,11 +777,11 @@ class GardenHorizonsBot:
         query = update.callback_query
         await query.answer()
         if query.from_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
-        await query.edit_message_text(
-            "📢 <b>Добавление канала для постинга стоков</b>\n\n"
-            "Отправьте ID канала (например: -1001234567890) или username (@channel):",
+        
+        await query.edit_message_caption(
+            caption="📢 <b>Добавление канала для постинга стоков</b>\n\nОтправьте ID канала (например: -1001234567890) или username (@channel):",
             parse_mode='HTML'
         )
         return ADD_POST_CHANNEL_ID
@@ -829,11 +834,11 @@ class GardenHorizonsBot:
         query = update.callback_query
         await query.answer()
         if query.from_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
         
         if not self.posting_channels:
-            await query.edit_message_text("📭 Нет каналов для удаления")
+            await query.edit_message_caption(caption="📭 Нет каналов для удаления")
             await self.show_admin_panel_callback(query)
             return ConversationHandler.END
         
@@ -842,8 +847,8 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"del_post_channel_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
         
-        await query.edit_message_text(
-            "🗑 <b>Выберите канал для удаления из постинга:</b>",
+        await query.edit_message_caption(
+            caption="🗑 <b>Выберите канал для удаления из постинга:</b>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -855,7 +860,7 @@ class GardenHorizonsBot:
         channel_id = query.data.replace('del_post_channel_', '')
         self.posting_channels = [ch for ch in self.posting_channels if ch['id'] != channel_id]
         save_channels(self.posting_channels)
-        await query.edit_message_text("✅ Канал удален из списка постинга!")
+        await query.edit_message_caption(caption="✅ Канал удален из списка постинга!")
         await self.show_admin_panel_callback(query)
         return ConversationHandler.END
     
@@ -864,11 +869,11 @@ class GardenHorizonsBot:
         query = update.callback_query
         await query.answer()
         if query.from_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
-        await query.edit_message_text(
-            "📧 <b>Рассылка</b>\n\n"
-            "Отправьте текст для рассылки всем пользователям:",
+        
+        await query.edit_message_caption(
+            caption="📧 <b>Рассылка</b>\n\nОтправьте текст для рассылки всем пользователям:",
             parse_mode='HTML'
         )
         return MAILING_TEXT
@@ -980,7 +985,12 @@ class GardenHorizonsBot:
                 f"⏱️ Интервал проверки: {UPDATE_INTERVAL} сек"
             )
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
-            await query.edit_message_text(stats_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+            # ✅ ИСПРАВЛЕНО: edit_message_caption
+            await query.edit_message_caption(
+                caption=stats_text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
         
         # Список каналов ОП
@@ -994,7 +1004,12 @@ class GardenHorizonsBot:
                 for ch in self.required_channels_list:
                     text += f"• {ch['name']} (ID: {ch['id']})\n"
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
-            await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+            # ✅ ИСПРАВЛЕНО: edit_message_caption
+            await query.edit_message_caption(
+                caption=text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
         
         # Список каналов постинга
@@ -1008,7 +1023,12 @@ class GardenHorizonsBot:
                 for ch in self.posting_channels:
                     text += f"• {ch['name']} (ID: {ch['id']})\n"
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
-            await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+            # ✅ ИСПРАВЛЕНО: edit_message_caption
+            await query.edit_message_caption(
+                caption=text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
         
         # Основное меню

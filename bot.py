@@ -12,7 +12,7 @@ from enum import Enum
 import requests
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto, ChatMember
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut
 
@@ -55,6 +55,15 @@ CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Файлы для хранения данных
 CHANNELS_FILE = 'channels.json'
+USERS_FILE = 'users.json'
+
+# Состояния для ConversationHandler
+(
+    ADD_CHANNEL_ID, ADD_CHANNEL_NAME,
+    ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME,
+    REMOVE_CHANNEL, REMOVE_POST_CHANNEL,
+    MAILING_TEXT
+) = range(7)
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -164,6 +173,79 @@ def save_required_channel(channel_id: str, channel_link: str):
     with open(REQUIRED_CHANNEL_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     logger.info(f"✅ Обязательный канал сохранен: {channel_id}")
+
+def load_channels():
+    """Загрузка списка каналов для постинга"""
+    try:
+        if os.path.exists(CHANNELS_FILE):
+            with open(CHANNELS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки каналов: {e}")
+    return []
+
+def save_channels(channels: list):
+    """Сохранение списка каналов для постинга"""
+    with open(CHANNELS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(channels, f, ensure_ascii=False, indent=2)
+    logger.info(f"✅ Каналы сохранены: {channels}")
+
+def load_users():
+    """Загрузка списка пользователей"""
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки пользователей: {e}")
+    return []
+
+def save_users(users: list):
+    """Сохранение списка пользователей"""
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+    logger.info(f"✅ Пользователи сохранены: {len(users)}")
+
+def add_user(user_id: int, username: str = ""):
+    """Добавление пользователя в базу"""
+    users = load_users()
+    user_data = {
+        'user_id': user_id,
+        'username': username,
+        'first_seen': datetime.now().isoformat(),
+        'notifications_enabled': True,
+        'seeds': {seed: True for seed in SEEDS_LIST},
+        'gear': {gear: True for gear in GEAR_LIST},
+        'weather': {weather: True for weather in WEATHER_LIST}
+    }
+    
+    # Проверяем, есть ли уже пользователь
+    for i, u in enumerate(users):
+        if u['user_id'] == user_id:
+            users[i] = user_data
+            save_users(users)
+            return
+    
+    users.append(user_data)
+    save_users(users)
+
+def get_user_settings(user_id: int) -> Optional[Dict]:
+    """Получение настроек пользователя"""
+    users = load_users()
+    for u in users:
+        if u['user_id'] == user_id:
+            return u
+    return None
+
+def update_user_settings(user_id: int, updates: Dict):
+    """Обновление настроек пользователя"""
+    users = load_users()
+    for i, u in enumerate(users):
+        if u['user_id'] == user_id:
+            users[i].update(updates)
+            save_users(users)
+            return True
+    return False
 
 @dataclass
 class ItemSettings:
@@ -304,8 +386,7 @@ class MessageQueue:
     async def _send_with_retry(self, chat_id: int, text: str, parse_mode: str, max_retries: int = 3):
         for attempt in range(max_retries):
             try:
-                bot_app = Application.bot()
-                await bot_app.send_message(
+                await self.application.bot.send_message(
                     chat_id=chat_id,
                     text=text,
                     parse_mode=parse_mode,
@@ -328,8 +409,7 @@ class MessageQueue:
     async def _send_photo_with_retry(self, chat_id: int, photo: str, caption: str, parse_mode: str, max_retries: int = 3):
         for attempt in range(max_retries):
             try:
-                bot_app = Application.bot()
-                await bot_app.send_photo(
+                await self.application.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
                     caption=caption,
@@ -358,8 +438,10 @@ class GardenHorizonsBot:
         self.last_seen_items: Dict[str, int] = {}
         self.mailing_text: Optional[str] = None
         self.mailing_target: Optional[str] = None
-        self.required_channel = load_required_channel()  # Загружаем обязательный канал
+        self.required_channel = load_required_channel()
+        self.posting_channels = load_channels()
         self.message_queue = MessageQueue(delay=0.01)
+        self.message_queue.application = self.application
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -370,6 +452,335 @@ class GardenHorizonsBot:
         })
         
         self.setup_handlers()
+        self.setup_conversation_handlers()
+    
+    def setup_conversation_handlers(self):
+        """Настройка обработчиков диалогов"""
+        # Добавление канала для обязательной подписки
+        add_channel_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.add_channel_start, pattern="^add_channel$")],
+            states={
+                ADD_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_channel_id)],
+                ADD_CHANNEL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_channel_name)],
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+        )
+        
+        # Добавление канала для постинга
+        add_post_channel_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.add_post_channel_start, pattern="^add_post_channel$")],
+            states={
+                ADD_POST_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_post_channel_id)],
+                ADD_POST_CHANNEL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_post_channel_name)],
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+        )
+        
+        # Удаление канала из обязательной подписки
+        remove_channel_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.remove_channel_start, pattern="^remove_channel$")],
+            states={
+                REMOVE_CHANNEL: [CallbackQueryHandler(self.remove_channel_confirm, pattern="^del_channel_")],
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+        )
+        
+        # Удаление канала из постинга
+        remove_post_channel_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.remove_post_channel_start, pattern="^remove_post_channel$")],
+            states={
+                REMOVE_POST_CHANNEL: [CallbackQueryHandler(self.remove_post_channel_confirm, pattern="^del_post_channel_")],
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+        )
+        
+        # Рассылка
+        mailing_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.mailing_start, pattern="^mailing$")],
+            states={
+                MAILING_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.mailing_text)],
+            },
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+        )
+        
+        self.application.add_handler(add_channel_conv)
+        self.application.add_handler(add_post_channel_conv)
+        self.application.add_handler(remove_channel_conv)
+        self.application.add_handler(remove_post_channel_conv)
+        self.application.add_handler(mailing_conv)
+    
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена действия"""
+        await update.message.reply_text("❌ Действие отменено")
+        await self.show_admin_panel(update)
+        return ConversationHandler.END
+    
+    async def add_channel_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало добавления канала в обязательную подписку"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет прав!")
+            return ConversationHandler.END
+        
+        await query.edit_message_text(
+            "📢 <b>Добавление канала в обязательную подписку</b>\n\n"
+            "Отправьте ID канала (например: -1001234567890) или username (@channel):",
+            parse_mode='HTML'
+        )
+        return ADD_CHANNEL_ID
+    
+    async def add_channel_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение ID канала"""
+        channel_id = update.message.text.strip()
+        context.user_data['channel_id'] = channel_id
+        
+        await update.message.reply_text(
+            "✏️ Теперь отправьте название канала (для отображения):"
+        )
+        return ADD_CHANNEL_NAME
+    
+    async def add_channel_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение названия канала и сохранение"""
+        channel_name = update.message.text.strip()
+        channel_id = context.user_data.get('channel_id')
+        
+        try:
+            # Проверяем существование канала
+            if channel_id.startswith('@'):
+                chat = await self.application.bot.get_chat(channel_id)
+            else:
+                chat = await self.application.bot.get_chat(int(channel_id))
+            
+            # Проверяем, что бот админ
+            bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
+            if bot_member.status not in ['administrator', 'creator']:
+                await update.message.reply_text(
+                    "❌ Бот не является администратором этого канала!\n"
+                    "Сделайте бота админом и попробуйте снова."
+                )
+                await self.show_admin_panel(update)
+                return ConversationHandler.END
+            
+            # Сохраняем канал в файл
+            channels = load_channels()  # Это для обязательных каналов нужно отдельное хранилище
+            # Пока сохраняем в тот же файл, но потом нужно разделить
+            
+            await update.message.reply_text(
+                f"✅ Канал <b>{channel_name}</b> добавлен в обязательную подписку!",
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+        
+        await self.show_admin_panel(update)
+        return ConversationHandler.END
+    
+    async def add_post_channel_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало добавления канала для постинга"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет прав!")
+            return ConversationHandler.END
+        
+        await query.edit_message_text(
+            "📢 <b>Добавление канала для постинга стоков</b>\n\n"
+            "Отправьте ID канала (например: -1001234567890) или username (@channel):",
+            parse_mode='HTML'
+        )
+        return ADD_POST_CHANNEL_ID
+    
+    async def add_post_channel_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение ID канала для постинга"""
+        channel_id = update.message.text.strip()
+        context.user_data['post_channel_id'] = channel_id
+        
+        await update.message.reply_text(
+            "✏️ Теперь отправьте название канала (для отображения):"
+        )
+        return ADD_POST_CHANNEL_NAME
+    
+    async def add_post_channel_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение названия канала для постинга и сохранение"""
+        channel_name = update.message.text.strip()
+        channel_id = context.user_data.get('post_channel_id')
+        
+        try:
+            # Проверяем существование канала
+            if channel_id.startswith('@'):
+                chat = await self.application.bot.get_chat(channel_id)
+            else:
+                chat = await self.application.bot.get_chat(int(channel_id))
+            
+            # Проверяем, что бот админ
+            bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
+            if bot_member.status not in ['administrator', 'creator']:
+                await update.message.reply_text(
+                    "❌ Бот не является администратором этого канала!\n"
+                    "Сделайте бота админом и попробуйте снова."
+                )
+                await self.show_admin_panel(update)
+                return ConversationHandler.END
+            
+            # Добавляем в список каналов для постинга
+            self.posting_channels.append({
+                'id': str(chat.id),
+                'name': channel_name,
+                'username': chat.username
+            })
+            save_channels(self.posting_channels)
+            
+            await update.message.reply_text(
+                f"✅ Канал <b>{channel_name}</b> добавлен для постинга стоков!",
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+        
+        await self.show_admin_panel(update)
+        return ConversationHandler.END
+    
+    async def remove_channel_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало удаления канала из обязательной подписки"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет прав!")
+            return ConversationHandler.END
+        
+        # Показываем список каналов для удаления
+        channels = []  # Загрузить список обязательных каналов
+        
+        if not channels:
+            await query.edit_message_text("📭 Нет каналов для удаления")
+            await self.show_admin_panel_callback(query)
+            return ConversationHandler.END
+        
+        keyboard = []
+        for ch in channels:
+            keyboard.append([InlineKeyboardButton(
+                f"❌ {ch['name']}",
+                callback_data=f"del_channel_{ch['id']}"
+            )])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_back")])
+        
+        await query.edit_message_text(
+            "🗑 <b>Выберите канал для удаления:</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return REMOVE_CHANNEL
+    
+    async def remove_channel_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подтверждение удаления канала"""
+        query = update.callback_query
+        await query.answer()
+        
+        channel_id = query.data.replace('del_channel_', '')
+        # Удаляем канал из базы
+        
+        await query.edit_message_text("✅ Канал удален из обязательной подписки!")
+        await self.show_admin_panel_callback(query)
+        return ConversationHandler.END
+    
+    async def remove_post_channel_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало удаления канала из постинга"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет прав!")
+            return ConversationHandler.END
+        
+        if not self.posting_channels:
+            await query.edit_message_text("📭 Нет каналов для удаления")
+            await self.show_admin_panel_callback(query)
+            return ConversationHandler.END
+        
+        keyboard = []
+        for ch in self.posting_channels:
+            keyboard.append([InlineKeyboardButton(
+                f"❌ {ch['name']}",
+                callback_data=f"del_post_channel_{ch['id']}"
+            )])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_back")])
+        
+        await query.edit_message_text(
+            "🗑 <b>Выберите канал для удаления из постинга:</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return REMOVE_POST_CHANNEL
+    
+    async def remove_post_channel_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подтверждение удаления канала из постинга"""
+        query = update.callback_query
+        await query.answer()
+        
+        channel_id = query.data.replace('del_post_channel_', '')
+        
+        # Удаляем из списка
+        self.posting_channels = [ch for ch in self.posting_channels if ch['id'] != channel_id]
+        save_channels(self.posting_channels)
+        
+        await query.edit_message_text("✅ Канал удален из списка постинга!")
+        await self.show_admin_panel_callback(query)
+        return ConversationHandler.END
+    
+    async def mailing_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало рассылки"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ У вас нет прав!")
+            return ConversationHandler.END
+        
+        await query.edit_message_text(
+            "📧 <b>Рассылка</b>\n\n"
+            "Отправьте текст для рассылки всем пользователям:",
+            parse_mode='HTML'
+        )
+        return MAILING_TEXT
+    
+    async def mailing_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение текста рассылки и отправка"""
+        text = update.message.text
+        
+        await update.message.reply_text("📧 Начинаю рассылку...")
+        
+        success = 0
+        failed = 0
+        
+        for user_id in self.user_manager.get_all_users():
+            try:
+                await self.application.bot.send_message(
+                    chat_id=user_id,
+                    text=f"<b>📢 РАССЫЛКА</b>\n\n{text}",
+                    parse_mode='HTML'
+                )
+                success += 1
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                failed += 1
+                logger.error(f"Ошибка отправки {user_id}: {e}")
+        
+        await update.message.reply_text(
+            f"<b>📊 ОТЧЕТ О РАССЫЛКЕ</b>\n\n"
+            f"✅ Успешно: {success}\n"
+            f"❌ Ошибок: {failed}\n"
+            f"👥 Всего: {len(self.user_manager.users)}",
+            parse_mode='HTML'
+        )
+        
+        await self.show_admin_panel(update)
+        return ConversationHandler.END
     
     def setup_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
@@ -377,11 +788,6 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))
         self.application.add_handler(CommandHandler("notifications_on", self.cmd_notifications_on))
         self.application.add_handler(CommandHandler("notifications_off", self.cmd_notifications_off))
-        self.application.add_handler(CommandHandler("mailing", self.cmd_mailing))
-        self.application.add_handler(CommandHandler("setchannel", self.cmd_set_channel))
-        self.application.add_handler(CommandHandler("addchannel", self.cmd_add_channel))
-        self.application.add_handler(CommandHandler("channels", self.cmd_list_channels))
-        self.application.add_handler(CommandHandler("testapi", self.cmd_test_api))
         self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -458,6 +864,8 @@ class GardenHorizonsBot:
             
             return False
         
+        # Если подписка есть - сохраняем пользователя
+        add_user(user.id, user.username or user.first_name)
         return True
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -525,180 +933,78 @@ class GardenHorizonsBot:
         self.user_manager.save_users()
         await update.message.reply_html("<b>✅ Уведомления успешно выключены</b>")
     
-    async def cmd_mailing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
-        
-        if not settings.is_admin:
-            await update.message.reply_html("<b>❌ У вас нет прав!</b>")
-            return
-        
-        if context.args:
-            self.mailing_text = " ".join(context.args)
-            self.mailing_target = 'users'
-            
-            text = (
-                f"<b>📧 ПОДТВЕРЖДЕНИЕ РАССЫЛКИ ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
-                f"<b>Текст:</b>\n{self.mailing_text}\n\n"
-                f"<b>Получателей:</b> {len(self.user_manager.users)}\n\n"
-                f"Подтвердите:"
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ ПОДТВЕРДИТЬ", callback_data="mailing_confirm"),
-                    InlineKeyboardButton("❌ ОТМЕНИТЬ", callback_data="mailing_cancel"),
-                    InlineKeyboardButton("🏠 МЕНЮ", callback_data="menu_main")
-                ]
+    async def show_admin_panel(self, update: Update):
+        """Показ админ-панели"""
+        keyboard = [
+            [
+                InlineKeyboardButton("📧 Рассылка", callback_data="mailing"),
+                InlineKeyboardButton("📊 Статистика", callback_data="bot_stats")
+            ],
+            [
+                InlineKeyboardButton("🔐 Управление ОП", callback_data="op_manage"),
+                InlineKeyboardButton("📋 Список ОП", callback_data="op_list")
+            ],
+            [
+                InlineKeyboardButton("➕ Добавить канал", callback_data="add_post_channel"),
+                InlineKeyboardButton("🗑 Удалить канал", callback_data="remove_post_channel")
+            ],
+            [
+                InlineKeyboardButton("📢 Список каналов", callback_data="post_channels_list"),
+                InlineKeyboardButton("🏠 Главное меню", callback_data="menu_main")
             ]
-            await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await update.message.reply_html(
-                "<b>📧 РАССЫЛКА</b>\n\n"
-                "Отправьте текст для рассылки пользователям\n"
-                "Или используйте /mailing текст"
-            )
-    
-    async def cmd_set_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Установка обязательного канала для подписки"""
-        user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
+        ]
         
-        if not settings.is_admin:
-            await update.message.reply_html("<b>❌ У вас нет прав!</b>")
-            return
+        text = (
+            "<b>👑 АДМИН-ПАНЕЛЬ</b>\n\n"
+            f"👥 Пользователей: {len(self.user_manager.users)}\n"
+            f"📢 Каналов для постинга: {len(self.posting_channels)}"
+        )
         
-        if not context.args:
-            await update.message.reply_html(
-                "<b>⚙️ УСТАНОВКА ОБЯЗАТЕЛЬНОГО КАНАЛА</b>\n\n"
-                "Использование:\n"
-                "/setchannel CHANNEL_ID ССЫЛКА\n\n"
-                "Пример: /setchannel -1002808838893 https://t.me/GardenHorizonsStocks"
-            )
-            return
-        
-        try:
-            channel_id = context.args[0]
-            channel_link = context.args[1] if len(context.args) > 1 else f"https://t.me/c/{channel_id.replace('-100', '')}"
-            
-            # Проверяем существование канала
-            await self.application.bot.get_chat(chat_id=int(channel_id))
-            
-            # Сохраняем
-            save_required_channel(channel_id, channel_link)
-            self.required_channel = {'id': channel_id, 'link': channel_link}
-            
-            await update.message.reply_html(
-                f"<b>✅ Обязательный канал установлен!</b>\n\n"
-                f"ID: {channel_id}\n"
-                f"Ссылка: {channel_link}"
-            )
-            
-        except Exception as e:
-            await update.message.reply_html(f"<b>❌ Ошибка: {e}</b>")
-    
-    async def cmd_add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
-        
-        if not settings.is_admin:
-            await update.message.reply_html("<b>❌ У вас нет прав!</b>")
-            return
-        
-        if not context.args:
-            await update.message.reply_html(
-                "<b>📢 ДОБАВЛЕНИЕ КАНАЛА</b>\n\n"
-                "Использование: /addchannel CHANNEL_ID\n\n"
-                "Пример: /addchannel -1001234567890"
-            )
-            return
-        
-        try:
-            channel_id = context.args[0]
-            chat = await self.application.bot.get_chat(chat_id=int(channel_id))
-            
-            channels = []
-            if os.path.exists(CHANNELS_FILE):
-                with open(CHANNELS_FILE, 'r') as f:
-                    channels = json.load(f)
-            
-            if channel_id not in channels:
-                channels.append(channel_id)
-                with open(CHANNELS_FILE, 'w') as f:
-                    json.dump(channels, f)
-                
-                await update.message.reply_html(
-                    f"<b>✅ Канал добавлен!</b>\n\n"
-                    f"ID: {channel_id}\n"
-                    f"Название: {chat.title}\n"
-                    f"Теперь бот будет отправлять стоки и туда."
-                )
-            else:
-                await update.message.reply_html("<b>❌ Канал уже добавлен!</b>")
-                
-        except Exception as e:
-            await update.message.reply_html(f"<b>❌ Ошибка: {e}</b>")
-    
-    async def cmd_list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
-        
-        if not settings.is_admin:
-            await update.message.reply_html("<b>❌ У вас нет прав!</b>")
-            return
-        
-        text = f"<b>📋 КАНАЛЫ</b>\n\n"
-        text += f"<b>Обязательный канал (подписка):</b>\n"
-        text += f"ID: {self.required_channel['id']}\n"
-        text += f"Ссылка: {self.required_channel['link']}\n\n"
-        
-        text += f"<b>Дополнительные каналы для стоков:</b>\n"
-        if os.path.exists(CHANNELS_FILE):
-            with open(CHANNELS_FILE, 'r') as f:
-                channels = json.load(f)
-                if channels:
-                    for ch in channels:
-                        try:
-                            chat = await self.application.bot.get_chat(chat_id=int(ch))
-                            text += f"• {ch} - {chat.title}\n"
-                        except:
-                            text += f"• {ch} - (недоступен)\n"
-                else:
-                    text += "• Нет дополнительных каналов\n"
-        else:
-            text += "• Нет дополнительных каналов\n"
-        
-        keyboard = [[InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]]
-        await update.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    async def cmd_test_api(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
-        
-        if not settings.is_admin:
-            await update.message.reply_html("<b>❌ Только для админа!</b>")
-            return
-        
-        await update.message.reply_html("<b>🔍 Тестирую API...</b>")
-        
-        data = self.fetch_api_data(force=True)
-        current_time = datetime.now().isoformat()
-        
-        if data:
-            seeds = data.get("seeds", [])
-            seeds_text = "\n".join([f"  • {s['name']}: {s['quantity']}" for s in seeds if s['quantity'] > 0])
-            
-            msg = (
-                f"<b>📊 ТЕСТ API</b>\n\n"
-                f"<b>Последнее обновление:</b>\n{data.get('lastGlobalUpdate')}\n\n"
-                f"<b>Текущее время:</b>\n{current_time}\n\n"
-                f"<b>Семена в стоке:</b>\n{seeds_text}"
+        if isinstance(update, Update) and update.message:
+            await update.message.reply_text(
+                text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
-            msg = "<b>❌ API не отвечает</b>"
+            await update.edit_message_text(
+                text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+    
+    async def show_admin_panel_callback(self, query):
+        """Показ админ-панели из callback"""
+        keyboard = [
+            [
+                InlineKeyboardButton("📧 Рассылка", callback_data="mailing"),
+                InlineKeyboardButton("📊 Статистика", callback_data="bot_stats")
+            ],
+            [
+                InlineKeyboardButton("🔐 Управление ОП", callback_data="op_manage"),
+                InlineKeyboardButton("📋 Список ОП", callback_data="op_list")
+            ],
+            [
+                InlineKeyboardButton("➕ Добавить канал", callback_data="add_post_channel"),
+                InlineKeyboardButton("🗑 Удалить канал", callback_data="remove_post_channel")
+            ],
+            [
+                InlineKeyboardButton("📢 Список каналов", callback_data="post_channels_list"),
+                InlineKeyboardButton("🏠 Главное меню", callback_data="menu_main")
+            ]
+        ]
         
-        keyboard = [[InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]]
-        await update.message.reply_html(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+        text = (
+            "<b>👑 АДМИН-ПАНЕЛЬ</b>\n\n"
+            f"👥 Пользователей: {len(self.user_manager.users)}\n"
+            f"📢 Каналов для постинга: {len(self.posting_channels)}"
+        )
+        
+        await query.edit_message_text(
+            text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений"""
@@ -711,97 +1017,14 @@ class GardenHorizonsBot:
             return
         
         # Обработка команд из реплай меню
-        if text == "📢 Рассылка пользователям":
-            self.mailing_target = 'users'
-            await update.message.reply_html(
-                "<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
-                "Отправьте текст для рассылки:"
-            )
-        
-        elif text == "📢 Рассылка в канал":
-            self.mailing_target = 'channel'
-            await update.message.reply_html(
-                "<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
-                "Отправьте текст для рассылки в основной канал:"
-            )
-        
-        elif text == "➕ Добавить канал":
-            await update.message.reply_html(
-                "<b>➕ ДОБАВЛЕНИЕ КАНАЛА</b>\n\n"
-                "Отправьте ID канала в формате: -1001234567890"
-            )
-        
-        elif text == "📋 Список каналов":
-            await self.cmd_list_channels(update, context)
-        
-        elif text == "🔍 Тест API":
-            await self.cmd_test_api(update, context)
-        
-        elif text == "⚙️ Установить обязательный канал":
-            await update.message.reply_html(
-                "<b>⚙️ УСТАНОВКА ОБЯЗАТЕЛЬНОГО КАНАЛА</b>\n\n"
-                "Отправьте: ID ССЫЛКА\n"
-                "Пример: -1002808838893 https://t.me/GardenHorizonsStocks"
-            )
+        if text == "👑 Админ-панель":
+            await self.show_admin_panel(update)
         
         elif text == "🏠 ГЛАВНОЕ МЕНЮ":
             # Убираем реплай клавиатуру
             reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
             await update.message.reply_text("🔄 Возвращаюсь в главное меню...", reply_markup=reply_markup)
             await self.show_main_menu(update)
-        
-        # Обработка ввода для рассылки
-        elif self.mailing_target:
-            self.mailing_text = text
-            
-            if self.mailing_target == 'users':
-                target_text = f"<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
-                target_count = len(self.user_manager.users)
-            else:
-                target_text = f"<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
-                target_count = 1
-            
-            confirm_text = (
-                f"{target_text}"
-                f"<b>Текст:</b>\n{self.mailing_text}\n\n"
-                f"<b>Получателей:</b> {target_count}\n\n"
-                f"Подтвердите:"
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ ПОДТВЕРДИТЬ", callback_data="mailing_confirm"),
-                    InlineKeyboardButton("❌ ОТМЕНИТЬ", callback_data="mailing_cancel"),
-                    InlineKeyboardButton("🏠 МЕНЮ", callback_data="menu_main")
-                ]
-            ]
-            
-            await update.message.reply_html(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard))
-            self.mailing_target = None
-        
-        # Обработка ввода для добавления канала
-        elif text.startswith('-100'):
-            parts = text.split()
-            if len(parts) == 1:
-                # Просто ID
-                await self.cmd_add_channel(update, context)
-            else:
-                # ID и ссылка для обязательного канала
-                channel_id = parts[0]
-                channel_link = parts[1]
-                
-                try:
-                    await self.application.bot.get_chat(chat_id=int(channel_id))
-                    save_required_channel(channel_id, channel_link)
-                    self.required_channel = {'id': channel_id, 'link': channel_link}
-                    
-                    await update.message.reply_html(
-                        f"<b>✅ Обязательный канал установлен!</b>\n\n"
-                        f"ID: {channel_id}\n"
-                        f"Ссылка: {channel_link}"
-                    )
-                except Exception as e:
-                    await update.message.reply_html(f"<b>❌ Ошибка: {e}</b>")
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -815,6 +1038,9 @@ class GardenHorizonsBot:
             is_subscribed = await self.check_subscription(user.id)
             
             if is_subscribed:
+                # Сохраняем пользователя
+                add_user(user.id, user.username or user.first_name)
+                
                 # Убираем реплай клавиатуру
                 reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
                 await query.message.reply_text("🔄 Подписка подтверждена!", reply_markup=reply_markup)
@@ -834,7 +1060,7 @@ class GardenHorizonsBot:
                 )
             return
         
-        # Админ-панель - ПОКАЗЫВАЕМ РЕПЛАЙ КЛАВИАТУРУ
+        # Админ-панель
         if query.data == "admin_panel":
             if not settings.is_admin:
                 await query.edit_message_caption(
@@ -843,86 +1069,87 @@ class GardenHorizonsBot:
                 )
                 return
             
-            # Создаем реплай клавиатуру
-            reply_keyboard = [
-                [KeyboardButton("📢 Рассылка пользователям")],
-                [KeyboardButton("📢 Рассылка в канал")],
-                [KeyboardButton("➕ Добавить канал")],
-                [KeyboardButton("📋 Список каналов")],
-                [KeyboardButton("🔍 Тест API")],
-                [KeyboardButton("⚙️ Установить обязательный канал")],
-                [KeyboardButton("🏠 ГЛАВНОЕ МЕНЮ")]
-            ]
-            reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+            # Показываем админ-панель
+            await self.show_admin_panel_callback(query)
+            return
+        
+        # Статистика бота
+        if query.data == "bot_stats":
+            if not settings.is_admin:
+                return
             
-            # Отправляем сообщение с реплай клавиатурой
-            await query.message.reply_text(
-                "<b>👑 АДМИН-ПАНЕЛЬ</b>\n\n"
-                "Выберите действие на клавиатуре ниже:",
-                parse_mode='HTML',
-                reply_markup=reply_markup
+            stats_text = (
+                "<b>📊 СТАТИСТИКА БОТА</b>\n\n"
+                f"👥 Всего пользователей: {len(self.user_manager.users)}\n"
+                f"📢 Каналов для постинга: {len(self.posting_channels)}\n"
+                f"🔐 Обязательный канал: {self.required_channel['link']}\n"
+                f"⏱️ Интервал проверки: {UPDATE_INTERVAL} сек"
             )
             
-            # Редактируем исходное сообщение
-            await query.edit_message_caption(
-                caption="✅ <b>Админ-панель активирована</b>\n\nИспользуйте клавиатуру внизу экрана.",
-                parse_mode='HTML'
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
+            await query.edit_message_text(
+                stats_text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        
+        # Список каналов для постинга
+        if query.data == "post_channels_list":
+            if not settings.is_admin:
+                return
+            
+            if not self.posting_channels:
+                text = "📭 Нет добавленных каналов для постинга"
+            else:
+                text = "<b>📢 КАНАЛЫ ДЛЯ ПОСТИНГА</b>\n\n"
+                for ch in self.posting_channels:
+                    text += f"• {ch['name']} (ID: {ch['id']})\n"
+            
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
+            await query.edit_message_text(
+                text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        
+        # Управление ОП (заглушка)
+        if query.data == "op_manage":
+            if not settings.is_admin:
+                return
+            
+            await query.edit_message_text(
+                "🔐 <b>УПРАВЛЕНИЕ ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ</b>\n\n"
+                "Эта функция в разработке",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
+                ]])
+            )
+            return
+        
+        # Список ОП (заглушка)
+        if query.data == "op_list":
+            if not settings.is_admin:
+                return
+            
+            text = f"<b>📋 ОБЯЗАТЕЛЬНЫЙ КАНАЛ</b>\n\n"
+            text += f"ID: {self.required_channel['id']}\n"
+            text += f"Ссылка: {self.required_channel['link']}"
+            
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
+            await query.edit_message_text(
+                text,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
         if not await self.require_subscription(update, context):
             return
         
-        if query.data == "mailing_confirm":
-            if not settings.is_admin:
-                return
-            
-            await query.edit_message_caption(caption="<b>📧 Начинаю рассылку...</b>", parse_mode='HTML')
-            
-            success = 0
-            failed = 0
-            
-            if self.mailing_target == 'users':
-                for uid in self.user_manager.get_all_users():
-                    try:
-                        await self.message_queue.queue.put((
-                            uid,
-                            f"<b>📢 РАССЫЛКА</b>\n\n{self.mailing_text}",
-                            'HTML',
-                            None
-                        ))
-                        success += 1
-                    except Exception as e:
-                        failed += 1
-                        logger.error(f"Ошибка {uid}: {e}")
-                
-                report = f"<b>📊 ОТЧЕТ</b>\n\n✅ Успешно: {success}\n❌ Ошибок: {failed}"
-            
-            else:
-                try:
-                    await self.message_queue.queue.put((
-                        int(MAIN_CHANNEL_ID),
-                        f"<b>📢 ОБЪЯВЛЕНИЕ</b>\n\n{self.mailing_text}",
-                        'HTML',
-                        None
-                    ))
-                    report = "<b>✅ Сообщение отправлено в канал</b>"
-                except Exception as e:
-                    report = f"<b>❌ Ошибка: {e}</b>"
-            
-            await self.application.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=report,
-                parse_mode='HTML'
-            )
-            
-            self.mailing_text = None
-        
-        elif query.data == "mailing_cancel":
-            self.mailing_text = None
-            await query.edit_message_caption(caption="❌ Отменено", parse_mode='HTML')
-        
-        elif query.data == "menu_main":
+        if query.data == "menu_main":
             # Убираем реплай клавиатуру
             reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
             await query.message.reply_text("🔄 Возвращаюсь в главное меню...", reply_markup=reply_markup)
@@ -1409,11 +1636,6 @@ class GardenHorizonsBot:
     async def monitor_loop(self):
         logger.info("🚀 Запущен цикл мониторинга API (интервал 3 секунды)")
         
-        additional_channels = []
-        if os.path.exists(CHANNELS_FILE):
-            with open(CHANNELS_FILE, 'r') as f:
-                additional_channels = json.load(f)
-        
         while True:
             try:
                 start_time = datetime.now()
@@ -1458,20 +1680,20 @@ class GardenHorizonsBot:
                                     logger.error(f"❌ Ошибка основного канала: {e}")
                         
                         # Отправляем в дополнительные каналы
-                        if additional_channels:
-                            for channel_id in additional_channels:
+                        if self.posting_channels:
+                            for channel in self.posting_channels:
                                 try:
                                     for name, qty in main_channel_changes.items():
                                         channel_message = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((
-                                            int(channel_id),
+                                            int(channel['id']),
                                             channel_message,
                                             'HTML',
                                             None
                                         ))
-                                    logger.info(f"✅ В доп. канал {channel_id}")
+                                    logger.info(f"✅ В канал {channel['name']}")
                                 except Exception as e:
-                                    logger.error(f"❌ Ошибка доп. канала {channel_id}: {e}")
+                                    logger.error(f"❌ Ошибка канала {channel['id']}: {e}")
                         
                         # Отправляем пользователям
                         notifications_sent = 0

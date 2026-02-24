@@ -689,24 +689,32 @@ class GardenHorizonsBot:
             )
     
     def fetch_api_data(self, force=False) -> Optional[Dict]:
+        """Получение данных из API с подробным логированием"""
         try:
             url = API_URL
             if force:
                 url = f"{API_URL}?t={int(datetime.now().timestamp())}"
             
+            logger.info(f"🔍 Запрос к API: {url}")
             response = self.session.get(url, timeout=10)
             
             if response.status_code != 200:
+                logger.warning(f"⚠️ API вернул статус {response.status_code}")
                 return None
             
             data = response.json()
+            logger.info(f"✅ Ответ API получен")
             
             if data.get("ok") and "data" in data:
+                last_update = data["data"].get("lastGlobalUpdate", "no date")
+                logger.info(f"📅 Последнее обновление: {last_update}")
                 return data["data"]
+            
+            logger.warning("⚠️ Неожиданная структура ответа API")
             return None
             
         except Exception as e:
-            logger.error(f"API ошибка: {e}")
+            logger.error(f"❌ Ошибка API: {e}")
             return None
     
     def format_stock_message(self, data: Dict) -> Optional[str]:
@@ -884,7 +892,11 @@ class GardenHorizonsBot:
         while True:
             try:
                 start_time = datetime.now()
+                logger.info("🔄 Проверка API...")
                 new_data = self.fetch_api_data(force=True)
+                
+                if new_data:
+                    logger.info(f"📊 Текущие данные: {new_data.get('lastGlobalUpdate')}")
                 
                 if new_data and self.last_data:
                     # Проверяем, изменились ли данные
@@ -893,6 +905,7 @@ class GardenHorizonsBot:
                         
                         # 1. ПОЛУЧАЕМ УНИКАЛЬНЫЕ ИЗМЕНЕНИЯ
                         all_changes = self.get_changed_items(self.last_data, new_data)
+                        logger.info(f"📦 Всего изменений: {len(all_changes)}")
                         
                         # 2. ФИЛЬТРУЕМ ТОЛЬКО РАЗРЕШЕННЫЕ ПРЕДМЕТЫ ДЛЯ КАНАЛА
                         channel_changes = {}
@@ -919,6 +932,7 @@ class GardenHorizonsBot:
                                     logger.error(f"❌ Ошибка отправки в канал: {e}")
                         
                         # 3. Отправляем персональные уведомления пользователям (без ограничений)
+                        notifications_sent = 0
                         for user_id, settings in self.user_manager.users.items():
                             if settings.notifications_enabled:
                                 is_subscribed = await self.check_subscription(user_id)
@@ -937,20 +951,25 @@ class GardenHorizonsBot:
                                                     text=pm_message,
                                                     parse_mode='HTML'
                                                 )
+                                                notifications_sent += 1
                                                 logger.info(f"✅ Уведомление отправлено {user_id}")
                                                 await asyncio.sleep(0.1)
                                             except Exception as e:
                                                 logger.error(f"❌ Ошибка отправки {user_id}: {e}")
+                        
+                        if notifications_sent > 0:
+                            logger.info(f"📨 Отправлено уведомлений: {notifications_sent}")
                         
                         self.last_data = new_data
                     
                 elif new_data and not self.last_data:
                     # Первый запуск
                     self.last_data = new_data
-                    logger.info(f"✅ Получены первые данные")
+                    logger.info(f"✅ Получены первые данные: {new_data.get('lastGlobalUpdate')}")
                 
                 elapsed = (datetime.now() - start_time).total_seconds()
                 sleep_time = max(1, UPDATE_INTERVAL - elapsed)
+                logger.info(f"⏱️ Следующая проверка через {sleep_time} сек")
                 await asyncio.sleep(sleep_time)
                 
             except Exception as e:
@@ -962,7 +981,9 @@ class GardenHorizonsBot:
         initial_data = self.fetch_api_data(force=True)
         if initial_data:
             self.last_data = initial_data
-            logger.info(f"✅ Данные загружены")
+            logger.info(f"✅ Данные загружены: {initial_data.get('lastGlobalUpdate')}")
+        else:
+            logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
         asyncio.create_task(self.monitor_loop())
         

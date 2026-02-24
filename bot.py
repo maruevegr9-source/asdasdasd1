@@ -111,7 +111,6 @@ def save_required_channel(channel_id: str, channel_link: str, channel_name: str 
     data = {'id': channel_id, 'link': channel_link, 'name': channel_name}
     with open(REQUIRED_CHANNEL_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    logger.info(f"✅ Обязательный канал сохранен: {channel_name} ({channel_id})")
 
 def load_required_channels_list():
     try:
@@ -154,7 +153,10 @@ def save_users(users: list):
 
 def add_user(user_id: int, username: str = ""):
     users = load_users()
-    user_data = {
+    for u in users:
+        if u['user_id'] == user_id:
+            return
+    users.append({
         'user_id': user_id,
         'username': username,
         'first_seen': datetime.now().isoformat(),
@@ -162,13 +164,7 @@ def add_user(user_id: int, username: str = ""):
         'seeds': {seed: True for seed in SEEDS_LIST},
         'gear': {gear: True for gear in GEAR_LIST},
         'weather': {weather: True for weather in WEATHER_LIST}
-    }
-    for i, u in enumerate(users):
-        if u['user_id'] == user_id:
-            users[i] = user_data
-            save_users(users)
-            return
-    users.append(user_data)
+    })
     save_users(users)
 
 def load_sent_items():
@@ -1027,19 +1023,13 @@ class GardenHorizonsBot:
             )
             return
         
-        # Управление ОП (эти callback уже обработаны выше)
-        if query.data in ["add_channel", "remove_channel"]:
-            # Эти обрабатываются ConversationHandler
+        # Обработка удаления каналов (передаем в ConversationHandler)
+        if query.data.startswith("del_channel_"):
+            # Передаем управление ConversationHandler
             return
         
-        # Управление постингом
-        if query.data in ["add_post_channel", "remove_post_channel"]:
-            # Эти обрабатываются ConversationHandler
-            return
-        
-        # Рассылка
-        if query.data == "mailing":
-            # Обрабатывается ConversationHandler
+        if query.data.startswith("del_post_channel_"):
+            # Передаем управление ConversationHandler
             return
         
         # Основное меню
@@ -1050,39 +1040,55 @@ class GardenHorizonsBot:
             reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
             await query.message.reply_text("🔄 Возвращаюсь в главное меню...", reply_markup=reply_markup)
             await self.show_main_menu_callback(query)
+            return
         
-        elif query.data == "menu_settings":
+        if query.data == "menu_settings":
             await self.show_main_settings_callback(query, settings)
+            return
         
-        elif query.data == "menu_stock":
+        if query.data == "menu_stock":
             await self.show_stock_callback(query)
+            return
         
-        elif query.data == "notifications_on":
+        if query.data == "notifications_on":
             settings.notifications_enabled = True
             self.user_manager.save_users()
             await query.edit_message_caption(caption="<b>✅ Уведомления включены!</b>", parse_mode='HTML')
             await asyncio.sleep(1)
             await self.show_main_menu_callback(query)
+            return
         
-        elif query.data == "notifications_off":
+        if query.data == "notifications_off":
             settings.notifications_enabled = False
             self.user_manager.save_users()
             await query.edit_message_caption(caption="<b>✅ Уведомления выключены</b>", parse_mode='HTML')
             await asyncio.sleep(1)
             await self.show_main_menu_callback(query)
+            return
         
-        elif query.data == "settings_seeds":
+        if query.data == "settings_seeds":
             await self.show_seeds_settings(query, settings)
-        elif query.data.startswith("seed_"):
+            return
+        
+        if query.data.startswith("seed_"):
             await self.handle_seed_callback(query, settings)
-        elif query.data == "settings_gear":
+            return
+        
+        if query.data == "settings_gear":
             await self.show_gear_settings(query, settings)
-        elif query.data.startswith("gear_"):
+            return
+        
+        if query.data.startswith("gear_"):
             await self.handle_gear_callback(query, settings)
-        elif query.data == "settings_weather":
+            return
+        
+        if query.data == "settings_weather":
             await self.show_weather_settings(query, settings)
-        elif query.data.startswith("weather_"):
+            return
+        
+        if query.data.startswith("weather_"):
             await self.handle_weather_callback(query, settings)
+            return
     
     # ========== ОТОБРАЖЕНИЕ МЕНЮ ==========
     
@@ -1288,8 +1294,11 @@ class GardenHorizonsBot:
                 return None
             
             data = response.json()
+            logger.info(f"✅ Ответ API получен")
             
             if data.get("ok") and "data" in data:
+                last_update = data["data"].get("lastGlobalUpdate", "no date")
+                logger.info(f"📅 Последнее обновление: {last_update}")
                 return data["data"]
             return None
             
@@ -1412,54 +1421,54 @@ class GardenHorizonsBot:
                 new_data = self.fetch_api_data(force=True)
                 
                 if new_data and self.last_data:
-                    changes = self.get_changed_items(self.last_data, new_data)
-                    
-                    if changes:
-                        logger.info(f"✅ Обнаружены изменения: {changes}")
+                    if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
+                        logger.info(f"✅ Обнаружены изменения в API!")
+                        changes = self.get_changed_items(self.last_data, new_data)
                         
-                        # 1. Отправляем в основной канал (только разрешенные)
-                        main_channel_items = {}
-                        for name, new_q in changes.items():
-                            if is_allowed_for_main_channel(name):
-                                main_channel_items[name] = new_q
-                        
-                        if MAIN_CHANNEL_ID and main_channel_items:
-                            msg = self.format_channel_message(
-                                list(main_channel_items.keys())[0],
-                                list(main_channel_items.values())[0]
-                            )
-                            if not was_item_sent(MAIN_CHANNEL_ID, "main_channel", new_data.get('lastGlobalUpdate', '')):
-                                await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
-                                mark_item_sent(MAIN_CHANNEL_ID, "main_channel", new_data.get('lastGlobalUpdate', ''))
-                                logger.info(f"📢 В основной канал отправлено обновление")
-                        
-                        # 2. Отправляем в дополнительные каналы (только разрешенные)
-                        for channel in self.posting_channels:
-                            if main_channel_items:
-                                msg = self.format_channel_message(
-                                    list(main_channel_items.keys())[0],
-                                    list(main_channel_items.values())[0]
-                                )
-                                if not was_item_sent(channel['id'], "channel_post", new_data.get('lastGlobalUpdate', '')):
-                                    await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
-                                    mark_item_sent(channel['id'], "channel_post", new_data.get('lastGlobalUpdate', ''))
-                                    logger.info(f"📢 В канал {channel['name']} отправлено обновление")
-                        
-                        # 3. Отправляем пользователям (ВСЕ выбранные предметы ОДНИМ сообщением)
-                        for user_id, settings in self.user_manager.users.items():
-                            if await self.check_subscription(user_id) and settings.notifications_enabled:
-                                user_items = self.get_user_items(changes, settings)
-                                if user_items and not was_item_sent(user_id, "user", new_data.get('lastGlobalUpdate', '')):
-                                    msg = self.format_pm_message(user_items)
-                                    await self.message_queue.queue.put((user_id, msg, 'HTML', None))
-                                    mark_item_sent(user_id, "user", new_data.get('lastGlobalUpdate', ''))
-                                    logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов")
-                        
-                        self.last_data = new_data
+                        if changes:
+                            logger.info(f"✅ Изменились предметы: {changes}")
+                            
+                            # 1. Отправляем в основной канал (только разрешенные)
+                            main_channel_items = {}
+                            for name, new_q in changes.items():
+                                if is_allowed_for_main_channel(name):
+                                    main_channel_items[name] = new_q
+                            
+                            if MAIN_CHANNEL_ID and main_channel_items:
+                                for name, qty in main_channel_items.items():
+                                    if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty):
+                                        msg = self.format_channel_message(name, qty)
+                                        await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
+                                        mark_item_sent(int(MAIN_CHANNEL_ID), name, qty)
+                                        logger.info(f"📢 В основной канал: {name} = {qty}")
+                            
+                            # 2. Отправляем в дополнительные каналы
+                            for channel in self.posting_channels:
+                                for name, qty in main_channel_items.items():
+                                    if not was_item_sent(int(channel['id']), name, qty):
+                                        msg = self.format_channel_message(name, qty)
+                                        await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
+                                        mark_item_sent(int(channel['id']), name, qty)
+                                        logger.info(f"📢 В канал {channel['name']}: {name} = {qty}")
+                            
+                            # 3. Отправляем пользователям
+                            for user_id, settings in self.user_manager.users.items():
+                                if await self.check_subscription(user_id) and settings.notifications_enabled:
+                                    user_items = self.get_user_items(changes, settings)
+                                    if user_items:
+                                        # Проверяем, не отправляли ли уже это обновление
+                                        update_key = f"user_{user_id}_{new_data.get('lastGlobalUpdate')}"
+                                        if not was_item_sent(user_id, update_key, 1):
+                                            msg = self.format_pm_message(user_items)
+                                            await self.message_queue.queue.put((user_id, msg, 'HTML', None))
+                                            mark_item_sent(user_id, update_key, 1)
+                                            logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов")
+                            
+                            self.last_data = new_data
                     
                 elif new_data and not self.last_data:
                     self.last_data = new_data
-                    logger.info(f"✅ Первые данные получены")
+                    logger.info(f"✅ Первые данные получены: {new_data.get('lastGlobalUpdate')}")
                 
                 elapsed = (datetime.now() - start_time).total_seconds()
                 sleep_time = max(5, UPDATE_INTERVAL - elapsed)
@@ -1474,7 +1483,9 @@ class GardenHorizonsBot:
         initial_data = self.fetch_api_data(force=True)
         if initial_data:
             self.last_data = initial_data
-            logger.info(f"✅ Данные загружены")
+            logger.info(f"✅ Данные загружены: {initial_data.get('lastGlobalUpdate')}")
+        else:
+            logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
         await self.message_queue.start()
         asyncio.create_task(self.monitor_loop())

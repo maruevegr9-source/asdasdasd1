@@ -22,12 +22,12 @@ load_dotenv()
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808838893")
-REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "-1002808838893")  # ID канала для обязательной подписки
+REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "-1002808838893")
 REQUIRED_CHANNEL_LINK = os.getenv("REQUIRED_CHANNEL_LINK", "https://t.me/GardenHorizonsStocks")
 REQUIRED_CHANNEL_USERNAME = os.getenv("REQUIRED_CHANNEL_USERNAME", "@GardenHorizonsStocks")
 
 API_URL = os.getenv("API_URL", "https://garden-horizons-stock.dawidfc.workers.dev/api/stock")
-UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "8"))
+UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "5"))  # 5 секунд для МАКСИМАЛЬНОЙ скорости
 ADMIN_ID = 8025951500
 
 # Настройка логирования
@@ -112,7 +112,7 @@ WEATHER_LIST = ["fog", "rain", "snow", "storm", "sandstorm", "starfall"]
 RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall"]
 
 # Защита от спама
-SPAM_PROTECTION_SECONDS = 20
+SPAM_PROTECTION_SECONDS = 10  # Уменьшил для более частых уведомлений
 last_notification_time: Dict[int, datetime] = {}
 
 def translate(text: str) -> str:
@@ -155,7 +155,7 @@ class UserSettings:
     seeds: Dict[str, ItemSettings] = field(default_factory=dict)
     gear: Dict[str, ItemSettings] = field(default_factory=dict)
     weather: Dict[str, ItemSettings] = field(default_factory=dict)
-    is_admin: bool = False  # Добавляем флаг админа
+    is_admin: bool = False
     
     def __post_init__(self):
         for seed in SEEDS_LIST:
@@ -236,7 +236,7 @@ class UserManager:
         return list(self.users.keys())
 
 class MessageQueue:
-    def __init__(self, delay: float = 0.03):
+    def __init__(self, delay: float = 0.02):  # 20ms между сообщениями
         self.queue = asyncio.Queue()
         self.delay = delay
         self._task = None
@@ -329,7 +329,7 @@ class GardenHorizonsBot:
         self.last_seen_items: Dict[str, int] = {}
         self.mailing_text: Optional[str] = None
         self.mailing_target: Optional[str] = None
-        self.message_queue = MessageQueue(delay=0.03)
+        self.message_queue = MessageQueue(delay=0.02)
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -361,7 +361,7 @@ class GardenHorizonsBot:
         try:
             if not REQUIRED_CHANNEL_ID:
                 logger.error("REQUIRED_CHANNEL_ID не задан!")
-                return False
+                return True  # Пропускаем если не задан
             
             logger.info(f"🔍 Проверка подписки {user_id} на канал {REQUIRED_CHANNEL_ID}")
             
@@ -384,7 +384,7 @@ class GardenHorizonsBot:
             
         except Exception as e:
             logger.error(f"❌ Ошибка проверки подписки {user_id}: {e}")
-            # Если ошибка - считаем что пользователь подписан, чтобы не блокировать
+            # В случае ошибки пропускаем, чтобы не блокировать пользователей
             return True
     
     async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -400,7 +400,6 @@ class GardenHorizonsBot:
             is_subscribed = await self.check_subscription(user.id)
         except Exception as e:
             logger.error(f"❌ Критическая ошибка проверки подписки: {e}")
-            # В случае ошибки - пропускаем (чтобы бот работал)
             return True
         
         if not is_subscribed:
@@ -442,6 +441,9 @@ class GardenHorizonsBot:
         if not await self.require_subscription(update, context):
             return
         
+        # Убираем реплай клавиатуру при старте
+        reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
+        await update.message.reply_text("🔄 Загружаю меню...", reply_markup=reply_markup)
         await self.show_main_menu(update)
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -651,79 +653,44 @@ class GardenHorizonsBot:
         settings = self.user_manager.get_user(user.id)
         text = update.message.text
         
-        # Если админ - показываем админ-меню
-        if settings.is_admin:
-            if text == "👑 АДМИН-ПАНЕЛЬ":
-                await self.show_admin_panel(update)
-            elif text == "📢 Рассылка пользователям":
-                self.mailing_target = 'users'
-                await update.message.reply_html(
-                    "<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
-                    "Отправьте текст для рассылки:"
-                )
-            elif text == "📢 Рассылка в канал":
-                self.mailing_target = 'channel'
-                await update.message.reply_html(
-                    "<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
-                    "Отправьте текст для рассылки в канал:"
-                )
-            elif text == "➕ Добавить канал":
-                await update.message.reply_html(
-                    "<b>➕ ДОБАВЛЕНИЕ КАНАЛА</b>\n\n"
-                    "Отправьте ID канала в формате: -1001234567890"
-                )
-            elif text == "📋 Список каналов":
-                await self.cmd_list_channels(update, context)
-            elif text == "🔍 Тест API":
-                await self.cmd_test_api(update, context)
-            elif text == "🏠 ГЛАВНОЕ МЕНЮ":
+        # Если админ и есть активная рассылка
+        if settings.is_admin and self.mailing_target:
+            if text == "🏠 ГЛАВНОЕ МЕНЮ":
+                self.mailing_target = None
+                self.mailing_text = None
                 await self.show_main_menu(update)
-            elif self.mailing_target:
-                self.mailing_text = text
-                
-                if self.mailing_target == 'users':
-                    target_text = f"<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
-                    target_count = len(self.user_manager.users)
-                else:
-                    target_text = f"<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
-                    target_count = 1
-                
-                confirm_text = (
-                    f"{target_text}"
-                    f"<b>Текст:</b>\n{self.mailing_text}\n\n"
-                    f"<b>Получателей:</b> {target_count}\n\n"
-                    f"Подтвердите:"
-                )
-                
-                keyboard = [
-                    [
-                        InlineKeyboardButton("✅ ПОДТВЕРДИТЬ", callback_data="mailing_confirm"),
-                        InlineKeyboardButton("❌ ОТМЕНИТЬ", callback_data="mailing_cancel"),
-                        InlineKeyboardButton("🏠 МЕНЮ", callback_data="menu_main")
-                    ]
+                return
+            
+            self.mailing_text = text
+            
+            if self.mailing_target == 'users':
+                target_text = f"<b>📧 РАССЫЛКА ПОЛЬЗОВАТЕЛЯМ</b>\n\n"
+                target_count = len(self.user_manager.users)
+            else:
+                target_text = f"<b>📧 РАССЫЛКА В КАНАЛ</b>\n\n"
+                target_count = 1
+            
+            confirm_text = (
+                f"{target_text}"
+                f"<b>Текст:</b>\n{self.mailing_text}\n\n"
+                f"<b>Получателей:</b> {target_count}\n\n"
+                f"Подтвердите:"
+            )
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ ПОДТВЕРДИТЬ", callback_data="mailing_confirm"),
+                    InlineKeyboardButton("❌ ОТМЕНИТЬ", callback_data="mailing_cancel"),
+                    InlineKeyboardButton("🏠 МЕНЮ", callback_data="menu_main")
                 ]
-                
-                await update.message.reply_html(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            ]
+            
+            await update.message.reply_html(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
         
-        # Для всех пользователей показываем главное меню
-        elif text == "🏠 ГЛАВНОЕ МЕНЮ":
+        # Для всех остальных сообщений
+        if text == "🏠 ГЛАВНОЕ МЕНЮ":
             await self.show_main_menu(update)
-    
-    async def show_admin_panel(self, update: Update):
-        """Показать админ-панель"""
-        reply_keyboard = [
-            [KeyboardButton("📢 Рассылка пользователям")],
-            [KeyboardButton("📢 Рассылка в канал")],
-            [KeyboardButton("➕ Добавить канал")],
-            [KeyboardButton("📋 Список каналов")],
-            [KeyboardButton("🔍 Тест API")],
-            [KeyboardButton("🏠 ГЛАВНОЕ МЕНЮ")]
-        ]
-        reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
-        
-        text = "<b>👑 АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие на клавиатуре ниже:"
-        
-        await update.message.reply_html(text, reply_markup=reply_markup)
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -751,6 +718,39 @@ class GardenHorizonsBot:
                     media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
+            return
+        
+        # Админ-панель
+        if query.data == "admin_panel":
+            if not settings.is_admin:
+                await query.edit_message_caption(
+                    caption="❌ <b>У вас нет прав доступа!</b>",
+                    parse_mode='HTML'
+                )
+                return
+            
+            # Показываем реплай клавиатуру админа
+            reply_keyboard = [
+                [KeyboardButton("📢 Рассылка пользователям")],
+                [KeyboardButton("📢 Рассылка в канал")],
+                [KeyboardButton("➕ Добавить канал")],
+                [KeyboardButton("📋 Список каналов")],
+                [KeyboardButton("🔍 Тест API")],
+                [KeyboardButton("🏠 ГЛАВНОЕ МЕНЮ")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+            
+            await query.message.reply_text(
+                "<b>👑 АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие на клавиатуре ниже:",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            
+            # Редактируем исходное сообщение с главным меню
+            await query.edit_message_caption(
+                caption="✅ <b>Админ-панель активирована</b>\n\nИспользуйте клавиатуру внизу экрана.",
+                parse_mode='HTML'
+            )
             return
         
         if not await self.require_subscription(update, context):
@@ -860,6 +860,10 @@ class GardenHorizonsBot:
         if settings.is_admin:
             keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
         
+        # Убираем реплай клавиатуру
+        reply_markup_remove = ReplyKeyboardMarkup([[]], resize_keyboard=True)
+        await update.message.reply_text("🔄 Обновляю меню...", reply_markup=reply_markup_remove)
+        
         await update.message.reply_photo(
             photo=IMAGE_MAIN,
             caption=MAIN_MENU_TEXT,
@@ -885,6 +889,10 @@ class GardenHorizonsBot:
         # Добавляем кнопку админ-панели для админа
         if settings.is_admin:
             keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
+        
+        # Убираем реплай клавиатуру
+        reply_markup_remove = ReplyKeyboardMarkup([[]], resize_keyboard=True)
+        await query.message.reply_text("🔄 Возвращаю главное меню...", reply_markup=reply_markup_remove)
         
         await query.edit_message_media(
             media=InputMediaPhoto(
@@ -1271,7 +1279,7 @@ class GardenHorizonsBot:
         return user_items
     
     async def monitor_loop(self):
-        logger.info("🚀 Запущен цикл мониторинга API")
+        logger.info("🚀 Запущен цикл мониторинга API (интервал 5 секунд)")
         
         additional_channels = []
         if os.path.exists(CHANNELS_FILE):
@@ -1372,7 +1380,8 @@ class GardenHorizonsBot:
                     logger.info(f"✅ Первые данные: {new_data.get('lastGlobalUpdate')}")
                 
                 elapsed = (datetime.now() - start_time).total_seconds()
-                sleep_time = max(2, UPDATE_INTERVAL - elapsed)
+                sleep_time = max(1, UPDATE_INTERVAL - elapsed)  # Минимум 1 секунда
+                logger.info(f"⏱️ Следующая проверка через {sleep_time} сек")
                 await asyncio.sleep(sleep_time)
                 
             except Exception as e:

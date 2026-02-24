@@ -112,10 +112,7 @@ def init_database():
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             first_seen TEXT,
-            notifications_enabled INTEGER DEFAULT 1,
-            seeds TEXT DEFAULT '{}',
-            gear TEXT DEFAULT '{}',
-            weather TEXT DEFAULT '{}'
+            notifications_enabled INTEGER DEFAULT 1
         )
     """)
     
@@ -158,6 +155,16 @@ def init_database():
             item_name TEXT,
             enabled INTEGER DEFAULT 1,
             PRIMARY KEY (user_id, item_name)
+        )
+    """)
+    
+    # Таблица для отслеживания отправленных обновлений пользователям
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_updates (
+            user_id INTEGER,
+            update_id TEXT,
+            sent_at TEXT,
+            PRIMARY KEY (user_id, update_id)
         )
     """)
     
@@ -216,7 +223,7 @@ def get_user_settings(user_id: int) -> Dict:
         (user_id,)
     )
     result = cur.fetchone()
-    notifications_enabled = result[0] if result else True
+    notifications_enabled = bool(result[0]) if result else True
     
     # Настройки предметов
     cur.execute(
@@ -359,6 +366,29 @@ def mark_item_sent(chat_id: int, item_name: str, quantity: int):
     cur.execute(
         "INSERT INTO sent_items (chat_id, item_name, quantity, sent_at) VALUES (?, ?, ?, ?)",
         (chat_id, item_name, quantity, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+def was_update_sent(user_id: int, update_id: str) -> bool:
+    """Проверяет, отправлялось ли уже это обновление пользователю"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM user_updates WHERE user_id = ? AND update_id = ?",
+        (user_id, update_id)
+    )
+    count = cur.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def mark_update_sent(user_id: int, update_id: str):
+    """Отмечает, что обновление отправлено пользователю"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO user_updates (user_id, update_id, sent_at) VALUES (?, ?, ?)",
+        (user_id, update_id, datetime.now().isoformat())
     )
     conn.commit()
     conn.close()
@@ -1655,7 +1685,12 @@ class GardenHorizonsBot:
         
         for item_name, quantity in items:
             translated = translate(item_name)
-            message += f"<b>{translated}:</b> {quantity} шт.\n"
+            if item_name in WEATHER_LIST:
+                # Для погоды - специальный формат
+                message += f"<b>Активна погода!</b> {translated}\n"
+            else:
+                # Для семян и снаряжения - с количеством
+                message += f"<b>{translated}:</b> {quantity} шт.\n"
         
         return message
     
@@ -1663,30 +1698,37 @@ class GardenHorizonsBot:
         """Получает только предметы которые появились или увеличились"""
         changes = {}
         
+        # Сначала обрабатываем семена
         if "seeds" in new_data:
             old_seeds = {s["name"]: s["quantity"] for s in old_data.get("seeds", [])}
             new_seeds = {s["name"]: s["quantity"] for s in new_data["seeds"]}
             
-            for name, new_q in new_seeds.items():
+            all_names = set(old_seeds.keys()) | set(new_seeds.keys())
+            for name in all_names:
                 if name not in TRANSLATIONS:
                     continue
                 old_q = old_seeds.get(name, 0)
+                new_q = new_seeds.get(name, 0)
                 if new_q > old_q:
                     changes[name] = new_q
                     logger.info(f"✅ {name} изменилось: {old_q} → {new_q}")
         
+        # Затем снаряжение
         if "gear" in new_data:
             old_gear = {g["name"]: g["quantity"] for g in old_data.get("gear", [])}
             new_gear = {g["name"]: g["quantity"] for g in new_data["gear"]}
             
-            for name, new_q in new_gear.items():
+            all_names = set(old_gear.keys()) | set(new_gear.keys())
+            for name in all_names:
                 if name not in TRANSLATIONS:
                     continue
                 old_q = old_gear.get(name, 0)
+                new_q = new_gear.get(name, 0)
                 if new_q > old_q:
                     changes[name] = new_q
                     logger.info(f"✅ {name} изменилось: {old_q} → {new_q}")
         
+        # Погода
         if "weather" in new_data:
             old_weather = old_data.get("weather", {})
             new_weather = new_data["weather"]
@@ -1758,18 +1800,20 @@ class GardenHorizonsBot:
                             
                             # 3. Отправляем пользователям
                             users = get_all_users()
+                            update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
+                            
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)
                                 if await self.check_subscription(user_id) and settings.notifications_enabled:
                                     user_items = self.get_user_items(changes, settings)
                                     if user_items:
                                         # Проверяем, не отправляли ли уже это обновление
-                                        update_key = f"user_{user_id}_{new_data.get('lastGlobalUpdate')}"
-                                        if not was_item_sent(user_id, update_key, 1):
+                                        if not was_update_sent(user_id, update_id):
                                             msg = self.format_pm_message(user_items)
-                                            await self.message_queue.queue.put((user_id, msg, 'HTML', None))
-                                            mark_item_sent(user_id, update_key, 1)
-                                            logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов")
+                                            if msg:
+                                                await self.message_queue.queue.put((user_id, msg, 'HTML', None))
+                                                mark_update_sent(user_id, update_id)
+                                                logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов")
                             
                             self.last_data = new_data
                     

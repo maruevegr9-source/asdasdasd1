@@ -2,7 +2,6 @@ import os
 import json
 import logging
 import asyncio
-import asyncio
 import random
 import sqlite3
 from datetime import datetime, timedelta
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")  # Основной канал автора
+MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 
 API_URL = os.getenv("API_URL", "https://garden-horizons-stock.dawidfc.workers.dev/api/stock")
@@ -138,7 +137,7 @@ def init_database():
             )
         """)
         
-        # Таблица каналов для автопостинга (ДРУГИЕ КАНАЛЫ)
+        # Таблица каналов для автопостинга
         cur.execute("""
             CREATE TABLE IF NOT EXISTS posting_channels (
                 channel_id TEXT PRIMARY KEY,
@@ -362,7 +361,7 @@ def remove_required_channel(channel_id: str):
     except Exception as e:
         logger.error(f"❌ Ошибка удаления канала ОП: {e}")
 
-# ----- КАНАЛЫ ДЛЯ АВТОПОСТИНГА (ДРУГИЕ КАНАЛЫ) -----
+# ----- КАНАЛЫ ДЛЯ АВТОПОСТИНГА -----
 
 def get_posting_channels() -> List[Dict]:
     try:
@@ -462,6 +461,47 @@ def mark_item_sent(chat_id: int, item_name: str, quantity: int):
         conn.close()
     except Exception as e:
         logger.error(f"❌ Ошибка отметки отправленного: {e}")
+
+# ----- СТАТИСТИКА -----
+
+def get_stats() -> Dict:
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM users")
+        users_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM required_channels")
+        op_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM posting_channels")
+        post_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM sent_items")
+        sent_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM user_sent_items")
+        user_sent_count = cur.fetchone()[0]
+        
+        conn.close()
+        
+        return {
+            'users': users_count,
+            'op_channels': op_count,
+            'posting_channels': post_count,
+            'sent_notifications': sent_count,
+            'user_sent_items': user_sent_count
+        }
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики: {e}")
+        return {
+            'users': 0,
+            'op_channels': 0,
+            'posting_channels': 0,
+            'sent_notifications': 0,
+            'user_sent_items': 0
+        }
 
 # ========== КЛАССЫ ==========
 
@@ -657,60 +697,48 @@ class GardenHorizonsBot:
             'Expires': '0'
         })
         
-        self.setup_conversation_handlers()
         self.setup_handlers()
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
         logger.info(f"📢 Каналов ОП: {len(self.required_channels)}")
         logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
     
-    def setup_conversation_handlers(self):
-        """Создание ConversationHandler"""
+    def setup_handlers(self):
+        """Настройка всех обработчиков"""
         
-        # Диалог добавления канала в ОП
-        self.add_op_conv = ConversationHandler(
+        # ConversationHandler для добавления канала в ОП
+        op_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_op_start, pattern="^add_op$")],
             states={
                 ADD_OP_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_op_id)],
                 ADD_OP_CHANNEL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_op_name)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel_op)],
-            name="add_op_conversation",
-            persistent=False
         )
         
-        # Диалог добавления канала для автопостинга
-        self.add_post_conv = ConversationHandler(
+        # ConversationHandler для добавления канала в автопостинг
+        post_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_post_start, pattern="^add_post$")],
             states={
                 ADD_POST_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_post_id)],
                 ADD_POST_CHANNEL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_post_name)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel_post)],
-            name="add_post_conversation",
-            persistent=False
         )
         
-        # Диалог рассылки
-        self.mailing_conv = ConversationHandler(
+        # ConversationHandler для рассылки
+        mailing_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.mailing_start, pattern="^mailing$")],
             states={
                 MAILING_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.mailing_get_text)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel_mailing)],
-            name="mailing_conversation",
-            persistent=False
         )
-    
-    def setup_handlers(self):
-        """Настройка обработчиков"""
         
-        # 1. СНАЧАЛА ConversationHandler
-        self.application.add_handler(self.add_op_conv)
-        self.application.add_handler(self.add_post_conv)
-        self.application.add_handler(self.mailing_conv)
-        
-        # 2. ПОТОМ команды
+        # Добавляем все обработчики
+        self.application.add_handler(op_conv)
+        self.application.add_handler(post_conv)
+        self.application.add_handler(mailing_conv)
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("settings", self.cmd_settings))
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))
@@ -718,11 +746,7 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("notifications_off", self.cmd_notifications_off))
         self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CommandHandler("admin", self.cmd_admin))
-        
-        # 3. ПОТОМ обработчик callback
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
-        
-        # 4. ПОТОМ обработчик сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
     
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
@@ -809,15 +833,13 @@ class GardenHorizonsBot:
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        logger.info(f"🚀 Команда /start от пользователя {user.id} (@{user.username})")
+        logger.info(f"🚀 Команда /start от пользователя {user.id}")
         
         self.user_manager.get_user(user.id, user.username or user.first_name)
         
         if not await self.require_subscription(update, context):
             return
         
-        reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
-        await update.message.reply_text("🔄 <b>Загружаю меню...</b>", reply_markup=reply_markup, parse_mode='HTML')
         await self.show_main_menu(update)
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -938,7 +960,7 @@ class GardenHorizonsBot:
         
         await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== УПРАВЛЕНИЕ ОП (ОБЯЗАТЕЛЬНАЯ ПОДПИСКА) ==========
+    # ========== УПРАВЛЕНИЕ ОП ==========
     
     async def show_op_menu(self, query):
         """Меню управления ОП"""
@@ -1061,7 +1083,7 @@ class GardenHorizonsBot:
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")]]
         await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== УПРАВЛЕНИЕ АВТОПОСТИНГОМ (ДРУГИЕ КАНАЛЫ) ==========
+    # ========== УПРАВЛЕНИЕ АВТОПОСТИНГОМ ==========
     
     async def show_post_menu(self, query):
         """Меню управления автопостингом"""
@@ -1197,7 +1219,6 @@ class GardenHorizonsBot:
             await query.edit_message_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
             return ConversationHandler.END
         
-        # Очищаем старые данные
         if 'mailing_text' in context.user_data:
             del context.user_data['mailing_text']
         
@@ -1275,7 +1296,6 @@ class GardenHorizonsBot:
             parse_mode='HTML'
         )
         
-        # Очищаем данные после рассылки
         if 'mailing_text' in context.user_data:
             del context.user_data['mailing_text']
         
@@ -1495,7 +1515,6 @@ class GardenHorizonsBot:
         user = update.effective_user
         text = update.message.text
         
-        # Проверяем, не находимся ли мы в диалоге
         if context.user_data.get(ADD_OP_CHANNEL_ID) or context.user_data.get(ADD_POST_CHANNEL_ID) or context.user_data.get(MAILING_TEXT):
             return
         
@@ -1868,7 +1887,7 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(channel['id']), name, qty)
                                         logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
                             
-                            # 3. Отправляем пользователям (личные сообщения)
+                            # 3. Отправляем пользователям
                             users = get_all_users()
                             
                             for user_id in users:

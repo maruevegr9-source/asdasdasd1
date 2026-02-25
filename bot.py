@@ -121,7 +121,6 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 def init_database():
     """Создает все необходимые таблицы в базе данных"""
     try:
-        # Пробуем создать соединение
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         logger.info(f"✅ Подключение к БД успешно: {DB_PATH}")
@@ -1888,37 +1887,34 @@ class GardenHorizonsBot:
         
         return message
     
-    def get_changed_items(self, old_data: Dict, new_data: Dict) -> Dict[str, int]:
-        """Получает ВСЕ предметы которые есть в новом стоке и количество"""
+    def get_all_current_items(self, data: Dict) -> Dict[str, int]:
+        """Получает ВСЕ предметы, которые есть в стоке прямо сейчас"""
         all_items = {}
         
-        # Сначала обрабатываем семена - берем ВСЕ предметы из нового стока
-        if "seeds" in new_data:
-            for item in new_data["seeds"]:
+        if "seeds" in data:
+            for item in data["seeds"]:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
-                    logger.info(f"✅ {name} в стоке: {item['quantity']}")
+                    logger.info(f"📦 В стоке {name}: {item['quantity']}")
         
-        # Затем снаряжение
-        if "gear" in new_data:
-            for item in new_data["gear"]:
+        if "gear" in data:
+            for item in data["gear"]:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
-                    logger.info(f"✅ {name} в стоке: {item['quantity']}")
+                    logger.info(f"📦 В стоке {name}: {item['quantity']}")
         
-        # Погода
-        if "weather" in new_data and new_data["weather"].get("active"):
-            wtype = new_data["weather"].get("type")
+        if "weather" in data and data["weather"].get("active"):
+            wtype = data["weather"].get("type")
             if wtype and wtype in TRANSLATIONS:
                 all_items[wtype] = 1
-                logger.info(f"✅ {wtype} активна")
+                logger.info(f"📦 В стоке погода: {wtype}")
         
         return all_items
     
-    def get_user_items(self, all_items: Dict[str, int], settings: UserSettings, user_id: int, update_id: str) -> List[tuple]:
-        """Фильтрует ВСЕ предметы по настройкам пользователя и проверяет, не отправлял ли уже"""
+    def get_user_items_to_send(self, all_items: Dict[str, int], settings: UserSettings, user_id: int, update_id: str) -> List[tuple]:
+        """Определяет, какие предметы нужно отправить пользователю"""
         user_items = []
         
         for name, quantity in all_items.items():
@@ -1933,7 +1929,7 @@ class GardenHorizonsBot:
                 if not settings.weather.get(name, ItemSettings()).enabled:
                     continue
             
-            # Проверяем, не отправляли ли уже этот предмет в этом обновлении
+            # Проверяем, отправляли ли уже этот предмет в этом обновлении
             if not was_item_sent_to_user(user_id, name, quantity, update_id):
                 user_items.append((name, quantity))
                 logger.info(f"✅ Будет отправлено пользователю {user_id}: {name} = {quantity}")
@@ -1951,18 +1947,19 @@ class GardenHorizonsBot:
                 new_data = self.fetch_api_data(force=True)
                 
                 if new_data and self.last_data:
+                    # Проверяем, изменились ли данные
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
                         logger.info(f"✅ Обнаружены изменения в API!")
                         
                         # Получаем ВСЕ предметы из нового стока
-                        all_items = self.get_changed_items(self.last_data, new_data)
+                        all_items = self.get_all_current_items(new_data)
                         
                         if all_items:
-                            logger.info(f"✅ Предметы в стоке: {all_items}")
+                            logger.info(f"✅ Все предметы в стоке: {all_items}")
                             
                             update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
-                            # 1. Отправляем в ОСНОВНОЙ канал (твой личный)
+                            # 1. Отправляем в ОСНОВНОЙ канал (только разрешенные)
                             main_channel_items = {}
                             for name, qty in all_items.items():
                                 if is_allowed_for_main_channel(name):
@@ -1992,7 +1989,7 @@ class GardenHorizonsBot:
                                 settings = self.user_manager.get_user(user_id)
                                 if await self.check_subscription(user_id) and settings.notifications_enabled:
                                     # Получаем ВСЕ предметы, которые нужно отправить этому пользователю
-                                    user_items = self.get_user_items(all_items, settings, user_id, update_id)
+                                    user_items = self.get_user_items_to_send(all_items, settings, user_id, update_id)
                                     
                                     if user_items:
                                         msg = self.format_pm_message(user_items)

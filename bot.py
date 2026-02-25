@@ -49,8 +49,18 @@ if os.environ.get('RAILWAY_ENVIRONMENT'):
     try:
         os.makedirs('/data', exist_ok=True)
         logger.info(f"📁 Папка /data создана/существует")
+        
+        # Проверяем права на запись
+        test_file = '/data/test_write.txt'
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        logger.info("✅ Права на запись в /data есть")
     except Exception as e:
         logger.error(f"❌ Ошибка создания папки /data: {e}")
+        # Используем временную папку если /data недоступна
+        DB_PATH = "/tmp/bot.db"
+        logger.info(f"✅ Использую временную БД: {DB_PATH}")
 else:
     DB_PATH = "bot.db"
     logger.info("✅ Локальная разработка, БД в bot.db")
@@ -66,7 +76,9 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = range(2)
+ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = range(2, 4)
+MAILING_TEXT = 4
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -109,6 +121,7 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 def init_database():
     """Создает все необходимые таблицы в базе данных"""
     try:
+        # Пробуем создать соединение
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         logger.info(f"✅ Подключение к БД успешно: {DB_PATH}")
@@ -172,6 +185,18 @@ def init_database():
                 update_id TEXT,
                 sent_at TEXT,
                 PRIMARY KEY (user_id, update_id)
+            )
+        """)
+        
+        # Таблица для отслеживания отправленных предметов пользователям
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_sent_items (
+                user_id INTEGER,
+                item_name TEXT,
+                quantity INTEGER,
+                sent_at TEXT,
+                update_id TEXT,
+                PRIMARY KEY (user_id, item_name, update_id)
             )
         """)
         
@@ -409,35 +434,35 @@ def remove_posting_channel(channel_id: str):
 
 # ----- ОТПРАВЛЕННЫЕ УВЕДОМЛЕНИЯ -----
 
-def was_item_sent(chat_id: int, item_name: str, quantity: int) -> bool:
-    """Проверяет, отправлялось ли уже такое уведомление"""
+def was_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_id: str) -> bool:
+    """Проверяет, отправлялся ли этот предмет пользователю в этом обновлении"""
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "SELECT COUNT(*) FROM sent_items WHERE chat_id = ? AND item_name = ? AND quantity = ?",
-            (chat_id, item_name, quantity)
+            "SELECT COUNT(*) FROM user_sent_items WHERE user_id = ? AND item_name = ? AND quantity = ? AND update_id = ?",
+            (user_id, item_name, quantity, update_id)
         )
         count = cur.fetchone()[0]
         conn.close()
         return count > 0
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки отправленного: {e}")
+        logger.error(f"❌ Ошибка проверки отправленного предмета: {e}")
         return False
 
-def mark_item_sent(chat_id: int, item_name: str, quantity: int):
-    """Отмечает, что уведомление отправлено"""
+def mark_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_id: str):
+    """Отмечает, что предмет отправлен пользователю"""
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO sent_items (chat_id, item_name, quantity, sent_at) VALUES (?, ?, ?, ?)",
-            (chat_id, item_name, quantity, datetime.now().isoformat())
+            "INSERT INTO user_sent_items (user_id, item_name, quantity, sent_at, update_id) VALUES (?, ?, ?, ?, ?)",
+            (user_id, item_name, quantity, datetime.now().isoformat(), update_id)
         )
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"❌ Ошибка отметки отправленного: {e}")
+        logger.error(f"❌ Ошибка отметки отправленного предмета: {e}")
 
 def was_update_sent(user_id: int, update_id: str) -> bool:
     """Проверяет, отправлялось ли уже это обновление пользователю"""
@@ -469,6 +494,36 @@ def mark_update_sent(user_id: int, update_id: str):
     except Exception as e:
         logger.error(f"❌ Ошибка отметки обновления пользователя: {e}")
 
+def was_item_sent(chat_id: int, item_name: str, quantity: int) -> bool:
+    """Проверяет, отправлялось ли уже такое уведомление в канал"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM sent_items WHERE chat_id = ? AND item_name = ? AND quantity = ?",
+            (chat_id, item_name, quantity)
+        )
+        count = cur.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки отправленного: {e}")
+        return False
+
+def mark_item_sent(chat_id: int, item_name: str, quantity: int):
+    """Отмечает, что уведомление отправлено в канал"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO sent_items (chat_id, item_name, quantity, sent_at) VALUES (?, ?, ?, ?)",
+            (chat_id, item_name, quantity, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка отметки отправленного: {e}")
+
 # ----- СТАТИСТИКА -----
 
 def get_stats() -> Dict:
@@ -492,6 +547,9 @@ def get_stats() -> Dict:
         cur.execute("SELECT COUNT(*) FROM user_updates")
         updates_count = cur.fetchone()[0]
         
+        cur.execute("SELECT COUNT(*) FROM user_sent_items")
+        user_sent_count = cur.fetchone()[0]
+        
         conn.close()
         
         return {
@@ -499,7 +557,8 @@ def get_stats() -> Dict:
             'op_channels': op_count,
             'posting_channels': post_count,
             'sent_notifications': sent_count,
-            'user_updates': updates_count
+            'user_updates': updates_count,
+            'user_sent_items': user_sent_count
         }
     except Exception as e:
         logger.error(f"❌ Ошибка получения статистики: {e}")
@@ -508,7 +567,8 @@ def get_stats() -> Dict:
             'op_channels': 0,
             'posting_channels': 0,
             'sent_notifications': 0,
-            'user_updates': 0
+            'user_updates': 0,
+            'user_sent_items': 0
         }
 
 # ========== КЛАССЫ ==========
@@ -1339,6 +1399,7 @@ class GardenHorizonsBot:
             f"🔐 Каналов ОП: {stats['op_channels']}\n"
             f"📢 Каналов для постинга: {stats['posting_channels']}\n"
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}\n"
+            f"📦 Отправлено предметов: {stats['user_sent_items']}\n"
             f"⏱️ Интервал проверки: {UPDATE_INTERVAL} сек"
         )
         
@@ -1507,16 +1568,19 @@ class GardenHorizonsBot:
             await self.show_stock_callback(query)
             return
         
+        # ========== ИСПРАВЛЕНИЕ: Уведомления НЕ закрывают меню ==========
         if query.data == "notifications_on":
             settings.notifications_enabled = True
             update_user_setting(user.id, 'notifications_enabled', True)
-            await query.edit_message_caption(caption="<b>✅ Уведомления включены!</b>", parse_mode='HTML')
+            # Отправляем НОВОЕ сообщение, не трогая старое
+            await query.message.reply_html("<b>✅ Уведомления включены!</b>")
             return
         
         if query.data == "notifications_off":
             settings.notifications_enabled = False
             update_user_setting(user.id, 'notifications_enabled', False)
-            await query.edit_message_caption(caption="<b>✅ Уведомления выключены</b>", parse_mode='HTML')
+            # Отправляем НОВОЕ сообщение, не трогая старое
+            await query.message.reply_html("<b>✅ Уведомления выключены</b>")
             return
         
         if query.data == "settings_seeds":
@@ -1825,62 +1889,54 @@ class GardenHorizonsBot:
         return message
     
     def get_changed_items(self, old_data: Dict, new_data: Dict) -> Dict[str, int]:
-        """Получает только предметы которые появились или увеличились"""
-        changes = {}
+        """Получает ВСЕ предметы которые есть в новом стоке и количество"""
+        all_items = {}
         
-        # Сначала обрабатываем семена
+        # Сначала обрабатываем семена - берем ВСЕ предметы из нового стока
         if "seeds" in new_data:
-            old_seeds = {s["name"]: s["quantity"] for s in old_data.get("seeds", [])}
-            new_seeds = {s["name"]: s["quantity"] for s in new_data["seeds"]}
-            
-            # Берем ВСЕ имена из нового стока
-            for name, new_q in new_seeds.items():
-                if name not in TRANSLATIONS:
-                    continue
-                old_q = old_seeds.get(name, 0)
-                if new_q > old_q:
-                    changes[name] = new_q
-                    logger.info(f"✅ {name} изменилось: {old_q} → {new_q}")
+            for item in new_data["seeds"]:
+                name = item["name"]
+                if name in TRANSLATIONS and item["quantity"] > 0:
+                    all_items[name] = item["quantity"]
+                    logger.info(f"✅ {name} в стоке: {item['quantity']}")
         
         # Затем снаряжение
         if "gear" in new_data:
-            old_gear = {g["name"]: g["quantity"] for g in old_data.get("gear", [])}
-            new_gear = {g["name"]: g["quantity"] for g in new_data["gear"]}
-            
-            for name, new_q in new_gear.items():
-                if name not in TRANSLATIONS:
-                    continue
-                old_q = old_gear.get(name, 0)
-                if new_q > old_q:
-                    changes[name] = new_q
-                    logger.info(f"✅ {name} изменилось: {old_q} → {new_q}")
+            for item in new_data["gear"]:
+                name = item["name"]
+                if name in TRANSLATIONS and item["quantity"] > 0:
+                    all_items[name] = item["quantity"]
+                    logger.info(f"✅ {name} в стоке: {item['quantity']}")
         
         # Погода
-        if "weather" in new_data:
-            old_weather = old_data.get("weather", {})
-            new_weather = new_data["weather"]
-            wtype = new_weather.get("type")
+        if "weather" in new_data and new_data["weather"].get("active"):
+            wtype = new_data["weather"].get("type")
             if wtype and wtype in TRANSLATIONS:
-                if new_weather.get("active") and not old_weather.get("active"):
-                    changes[wtype] = 1
-                    logger.info(f"✅ {wtype} началась")
+                all_items[wtype] = 1
+                logger.info(f"✅ {wtype} активна")
         
-        return changes
+        return all_items
     
-    def get_user_items(self, changes: Dict[str, int], settings: UserSettings) -> List[tuple]:
-        """Фильтрует изменения по настройкам пользователя"""
+    def get_user_items(self, all_items: Dict[str, int], settings: UserSettings, user_id: int, update_id: str) -> List[tuple]:
+        """Фильтрует ВСЕ предметы по настройкам пользователя и проверяет, не отправлял ли уже"""
         user_items = []
         
-        for name, quantity in changes.items():
+        for name, quantity in all_items.items():
+            # Проверяем, включен ли предмет в настройках
             if name in SEEDS_LIST:
-                if settings.seeds.get(name, ItemSettings()).enabled:
-                    user_items.append((name, quantity))
+                if not settings.seeds.get(name, ItemSettings()).enabled:
+                    continue
             elif name in GEAR_LIST:
-                if settings.gear.get(name, ItemSettings()).enabled:
-                    user_items.append((name, quantity))
+                if not settings.gear.get(name, ItemSettings()).enabled:
+                    continue
             elif name in WEATHER_LIST:
-                if settings.weather.get(name, ItemSettings()).enabled:
-                    user_items.append((name, quantity))
+                if not settings.weather.get(name, ItemSettings()).enabled:
+                    continue
+            
+            # Проверяем, не отправляли ли уже этот предмет в этом обновлении
+            if not was_item_sent_to_user(user_id, name, quantity, update_id):
+                user_items.append((name, quantity))
+                logger.info(f"✅ Будет отправлено пользователю {user_id}: {name} = {quantity}")
         
         return user_items
     
@@ -1897,16 +1953,20 @@ class GardenHorizonsBot:
                 if new_data and self.last_data:
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
                         logger.info(f"✅ Обнаружены изменения в API!")
-                        changes = self.get_changed_items(self.last_data, new_data)
                         
-                        if changes:
-                            logger.info(f"✅ Изменились предметы: {changes}")
+                        # Получаем ВСЕ предметы из нового стока
+                        all_items = self.get_changed_items(self.last_data, new_data)
+                        
+                        if all_items:
+                            logger.info(f"✅ Предметы в стоке: {all_items}")
+                            
+                            update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
                             # 1. Отправляем в ОСНОВНОЙ канал (твой личный)
                             main_channel_items = {}
-                            for name, new_q in changes.items():
+                            for name, qty in all_items.items():
                                 if is_allowed_for_main_channel(name):
-                                    main_channel_items[name] = new_q
+                                    main_channel_items[name] = qty
                             
                             if MAIN_CHANNEL_ID and main_channel_items:
                                 for name, qty in main_channel_items.items():
@@ -1925,22 +1985,23 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(channel['id']), name, qty)
                                         logger.info(f"📢 В канал {channel['name']}: {name} = {qty}")
                             
-                            # 3. Отправляем пользователям
+                            # 3. Отправляем пользователям - ВСЕ предметы, которые они выбрали
                             users = get_all_users()
-                            update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)
                                 if await self.check_subscription(user_id) and settings.notifications_enabled:
-                                    user_items = self.get_user_items(changes, settings)
+                                    # Получаем ВСЕ предметы, которые нужно отправить этому пользователю
+                                    user_items = self.get_user_items(all_items, settings, user_id, update_id)
+                                    
                                     if user_items:
-                                        # Проверяем, не отправляли ли уже это обновление
-                                        if not was_update_sent(user_id, update_id):
-                                            msg = self.format_pm_message(user_items)
-                                            if msg:
-                                                await self.message_queue.queue.put((user_id, msg, 'HTML', None))
-                                                mark_update_sent(user_id, update_id)
-                                                logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов")
+                                        msg = self.format_pm_message(user_items)
+                                        if msg:
+                                            await self.message_queue.queue.put((user_id, msg, 'HTML', None))
+                                            # Отмечаем каждый отправленный предмет
+                                            for name, qty in user_items:
+                                                mark_item_sent_to_user(user_id, name, qty, update_id)
+                                            logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов: {user_items}")
                             
                             self.last_data = new_data
                     

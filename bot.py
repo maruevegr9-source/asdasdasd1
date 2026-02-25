@@ -1,10 +1,13 @@
 import os
 import logging
-import sqlite3
 import asyncio
 import random
+import sqlite3
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
+from dataclasses import dataclass, field  # ЭТОТ ИМПОРТ БЫЛ ПРОПУЩЕН!
+from collections import defaultdict
+from enum import Enum
 
 import requests
 from dotenv import load_dotenv

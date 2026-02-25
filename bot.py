@@ -1237,7 +1237,6 @@ class GardenHorizonsBot:
         self.reload_channels()
         
         await query.answer("✅ Канал удален из ОП!")
-        await query.message.reply_text("✅ <b>Канал удален из ОП!</b>", parse_mode='HTML')
         await self.show_op_remove(query)
     
     async def show_op_list(self, query):
@@ -2130,6 +2129,11 @@ class GardenHorizonsBot:
                 new_data = self.fetch_api_data(force=True)
                 
                 if new_data and self.last_data:
+                    # Переменные для отслеживания изменений
+                    weather_changed = False
+                    stock_changed = False
+                    weather_info = None
+                    
                     # Проверяем изменения в погоде
                     weather_status, weather_type, ends_at = self.get_weather_change(self.last_data, new_data)
                     
@@ -2137,44 +2141,36 @@ class GardenHorizonsBot:
                         update_id = f"weather_{weather_status}_{datetime.now().isoformat()}"
                         
                         if not was_weather_notification_sent(weather_type, weather_status, update_id):
-                            # Отправляем уведомление о погоде пользователям
-                            users = get_all_users()
-                            
+                            weather_changed = True
                             if weather_status == 'started':
-                                message = self.format_weather_started_message(weather_type, ends_at)
-                            else:  # ended
-                                message = self.format_weather_ended_message(weather_type)
+                                weather_info = self.format_weather_started_message(weather_type, ends_at)
+                            else:
+                                weather_info = self.format_weather_ended_message(weather_type)
                             
-                            logger.info(f"🌤️ Отправка уведомления о {weather_status} погоды {weather_type}")
-                            
-                            sent_count = 0
-                            for user_id in users:
-                                settings = self.user_manager.get_user(user_id)
-                                if await self.check_subscription(user_id) and settings.notifications_enabled:
-                                    if settings.weather.get(weather_type, ItemSettings()).enabled:
-                                        await self.message_queue.queue.put((user_id, message, 'HTML', None))
-                                        sent_count += 1
-                            
+                            logger.info(f"🌤️ Изменение погоды: {weather_status} {weather_type}")
                             mark_weather_notification_sent(weather_type, weather_status, update_id)
-                            logger.info(f"📤 Уведомление о погоде отправлено {sent_count} пользователям")
                     
                     # Проверяем изменения в стоке
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
+                        stock_changed = True
                         logger.info(f"✅ Обнаружены изменения в API!")
-                        
+                    
+                    # Если есть изменения, отправляем одним сообщением
+                    if stock_changed or weather_changed:
                         all_items = self.get_all_current_items(new_data)
                         
-                        if all_items:
-                            logger.info(f"✅ Все предметы в стоке: {all_items}")
+                        if all_items or weather_info:
+                            logger.info(f"✅ Отправка обновлений: сток={bool(all_items)}, погода={weather_info}")
                             
                             update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
-                            # 1. Отправляем в ОСНОВНОЙ канал
+                            # Формируем сообщение для каналов (только сток)
                             main_channel_items = {}
                             for name, qty in all_items.items():
                                 if is_allowed_for_main_channel(name):
                                     main_channel_items[name] = qty
                             
+                            # 1. Отправляем в ОСНОВНОЙ канал
                             if MAIN_CHANNEL_ID and main_channel_items:
                                 for name, qty in main_channel_items.items():
                                     if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty):
@@ -2198,15 +2194,32 @@ class GardenHorizonsBot:
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)
                                 if await self.check_subscription(user_id) and settings.notifications_enabled:
+                                    # Собираем предметы для пользователя
                                     user_items = self.get_user_items_to_send(all_items, settings, user_id, update_id)
                                     
+                                    # Формируем единое сообщение
+                                    message_parts = []
+                                    
+                                    # Добавляем информацию о погоде если есть
+                                    if weather_info and settings.weather.get(weather_type, ItemSettings()).enabled:
+                                        message_parts.append(weather_info)
+                                    
+                                    # Добавляем предметы если есть
                                     if user_items:
-                                        msg = self.format_pm_message(user_items)
-                                        if msg:
-                                            await self.message_queue.queue.put((user_id, msg, 'HTML', None))
-                                            for name, qty in user_items:
-                                                mark_item_sent_to_user(user_id, name, qty, update_id)
-                                            logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов: {[f'{name}:{qty}' for name, qty in user_items]}")
+                                        items_msg = self.format_pm_message(user_items)
+                                        if items_msg:
+                                            message_parts.append(items_msg)
+                                    
+                                    # Отправляем одним сообщением
+                                    if message_parts:
+                                        full_message = "\n\n".join(message_parts)
+                                        await self.message_queue.queue.put((user_id, full_message, 'HTML', None))
+                                        
+                                        # Отмечаем отправленные предметы
+                                        for name, qty in user_items:
+                                            mark_item_sent_to_user(user_id, name, qty, update_id)
+                                        
+                                        logger.info(f"👤 Пользователю {user_id} отправлено: {len(user_items)} предметов, погода={bool(weather_info)}")
                             
                             self.last_data = new_data
                     

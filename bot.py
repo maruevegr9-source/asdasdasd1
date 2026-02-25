@@ -67,7 +67,9 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = range(2)
+ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = range(2, 4)
+MAILING_TEXT = 4
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -915,7 +917,7 @@ class GardenHorizonsBot:
         
         await self.show_admin_panel(update)
     
-    # ========== АДМИН-ПАНЕЛЬ С ГОРИЗОНТАЛЬНЫМИ КНОПКАМИ ==========
+    # ========== АДМИН-ПАНЕЛЬ ==========
     
     async def show_admin_panel(self, update: Update):
         user_id = update.effective_user.id
@@ -923,7 +925,7 @@ class GardenHorizonsBot:
         
         stats = get_stats()
         
-        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ - по 2 в ряд
+        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
             [
                 InlineKeyboardButton("🔐 НАСТРОЙКА ОП", callback_data="admin_op"),
@@ -946,7 +948,6 @@ class GardenHorizonsBot:
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
         )
         
-        # Отправляем новое сообщение
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_admin_panel_callback(self, query):
@@ -955,7 +956,7 @@ class GardenHorizonsBot:
         
         stats = get_stats()
         
-        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ - по 2 в ряд
+        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
             [
                 InlineKeyboardButton("🔐 НАСТРОЙКА ОП", callback_data="admin_op"),
@@ -989,7 +990,7 @@ class GardenHorizonsBot:
         # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
             [
-                InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data="admin_op_add"),
+                InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data="add_op"),
                 InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data="admin_op_remove")
             ],
             [
@@ -1079,12 +1080,9 @@ class GardenHorizonsBot:
             await self.show_op_menu(query)
             return
         
-        # Создаем горизонтальные кнопки для каждого канала (по 1 в ряд для читаемости)
         keyboard = []
         for ch in self.required_channels:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"op_del_{ch['id']}")])
-        
-        # Добавляем кнопку назад
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")])
         
         await query.edit_message_text(
@@ -1128,7 +1126,7 @@ class GardenHorizonsBot:
         # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
             [
-                InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data="admin_post_add"),
+                InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data="add_post"),
                 InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data="admin_post_remove")
             ],
             [
@@ -1217,11 +1215,9 @@ class GardenHorizonsBot:
             await self.show_post_menu(query)
             return
         
-        # Создаем горизонтальные кнопки для каждого канала
         keyboard = []
         for ch in self.posting_channels:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"post_del_{ch['id']}")])
-        
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")])
         
         await query.edit_message_text(
@@ -1433,7 +1429,7 @@ class GardenHorizonsBot:
             return
         
         # Добавление канала в ОП
-        if query.data == "admin_op_add":
+        if query.data == "add_op":
             if not settings.is_admin:
                 return
             # Передаем управление ConversationHandler - возвращаем ничего
@@ -1468,7 +1464,7 @@ class GardenHorizonsBot:
             return
         
         # Добавление канала в автопостинг
-        if query.data == "admin_post_add":
+        if query.data == "add_post":
             if not settings.is_admin:
                 return
             # Передаем управление ConversationHandler

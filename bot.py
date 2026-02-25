@@ -1,13 +1,10 @@
 import os
 import logging
+import sqlite3
 import asyncio
 import random
-import sqlite3
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Set
-from dataclasses import dataclass, field
-from collections import defaultdict
-from enum import Enum
+from typing import Dict, Any, Optional, List
 
 import requests
 from dotenv import load_dotenv
@@ -42,7 +39,7 @@ ADMIN_ID = 8025951500
 # База данных
 if os.environ.get('RAILWAY_ENVIRONMENT'):
     DB_PATH = "/data/bot.db"
-    logger.info("✅ Работаем на Railway, БД в /data/bot.db")
+    logger.info(f"✅ Работаем на Railway, БД в /data/bot.db")
     try:
         os.makedirs('/data', exist_ok=True)
         logger.info(f"📁 Папка /data создана/существует")
@@ -126,7 +123,7 @@ def init_database():
             )
         """)
         
-        # Таблица обязательных каналов (ОП)
+        # Таблица обязательных каналов (ОП) - ЭТО ГЛАВНОЕ!
         cur.execute("""
             CREATE TABLE IF NOT EXISTS required_channels (
                 channel_id TEXT PRIMARY KEY,
@@ -165,16 +162,6 @@ def init_database():
                 item_name TEXT,
                 enabled INTEGER DEFAULT 1,
                 PRIMARY KEY (user_id, item_name)
-            )
-        """)
-        
-        # Таблица для отслеживания отправленных обновлений пользователям
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_updates (
-                user_id INTEGER,
-                update_id TEXT,
-                sent_at TEXT,
-                PRIMARY KEY (user_id, update_id)
             )
         """)
         
@@ -317,7 +304,7 @@ def get_users_count() -> int:
         logger.error(f"❌ Ошибка получения количества пользователей: {e}")
         return 0
 
-# ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) -----
+# ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) - ОСНОВНАЯ ФУНКЦИЯ -----
 
 def get_required_channels() -> List[Dict]:
     try:
@@ -784,7 +771,7 @@ class GardenHorizonsBot:
         await self.show_admin_panel(update)
         return ConversationHandler.END
     
-    # ========== ПРОВЕРКА ПОДПИСКИ ==========
+    # ========== ОСНОВНАЯ ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ==========
     
     async def check_subscription(self, user_id: int) -> bool:
         """
@@ -792,33 +779,59 @@ class GardenHorizonsBot:
         Допустимые статусы: MEMBER, ADMINISTRATOR, OWNER, RESTRICTED
         """
         if not self.required_channels:
+            logger.info(f"Нет обязательных каналов для пользователя {user_id}")
             return True
+        
+        logger.info(f"🔍 Проверка подписки для пользователя {user_id}")
         
         for channel in self.required_channels:
             try:
                 # Преобразуем ID в число для API Telegram
-                channel_id = int(channel['id']) if channel['id'].lstrip('-').isdigit() else channel['id']
+                channel_id_str = channel['id']
+                channel_name = channel['name']
+                
+                logger.info(f"  Проверка канала: {channel_name} ({channel_id_str})")
+                
+                # Определяем chat_id для запроса
+                if channel_id_str.startswith('@'):
+                    chat_id = channel_id_str
+                else:
+                    # Пробуем преобразовать в число
+                    try:
+                        chat_id = int(channel_id_str)
+                    except ValueError:
+                        logger.error(f"  ❌ Не удалось преобразовать ID канала: {channel_id_str}")
+                        return False
                 
                 # Получаем информацию о пользователе в канале
-                member = await self.application.bot.get_chat_member(
-                    chat_id=channel_id, 
-                    user_id=user_id
-                )
-                
-                # Проверяем статус
-                if member.status not in [
-                    ChatMember.MEMBER, 
-                    ChatMember.ADMINISTRATOR, 
-                    ChatMember.OWNER, 
-                    ChatMember.RESTRICTED
-                ]:
-                    logger.info(f"Пользователь {user_id} не подписан на {channel['name']} (статус: {member.status})")
+                try:
+                    member = await self.application.bot.get_chat_member(
+                        chat_id=chat_id, 
+                        user_id=user_id
+                    )
+                    
+                    # Проверяем статус
+                    if member.status not in [
+                        ChatMember.MEMBER, 
+                        ChatMember.ADMINISTRATOR, 
+                        ChatMember.OWNER, 
+                        ChatMember.RESTRICTED
+                    ]:
+                        logger.info(f"  ❌ Пользователь {user_id} не подписан на {channel_name} (статус: {member.status})")
+                        return False
+                    else:
+                        logger.info(f"  ✅ Пользователь подписан на {channel_name} (статус: {member.status})")
+                        
+                except Exception as e:
+                    logger.error(f"  ❌ Ошибка получения информации о подписке: {e}")
+                    # В случае ошибки считаем, что пользователь не подписан
                     return False
                     
             except Exception as e:
-                logger.error(f"Ошибка проверки канала {channel['id']}: {e}")
+                logger.error(f"❌ Общая ошибка проверки канала {channel.get('id', 'unknown')}: {e}")
                 return False
         
+        logger.info(f"✅ Все проверки пройдены для пользователя {user_id}")
         return True
     
     async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -831,9 +844,11 @@ class GardenHorizonsBot:
         
         # Админ всегда имеет доступ
         if settings.is_admin:
+            logger.info(f"👑 Админ {user.id} пропущен без проверки подписки")
             return True
         
         # Проверяем подписку
+        logger.info(f"🔍 require_subscription для пользователя {user.id}")
         is_subscribed = await self.check_subscription(user.id)
         
         if not is_subscribed:
@@ -860,6 +875,7 @@ class GardenHorizonsBot:
             
             # Отправляем сообщение в зависимости от типа update
             if update.message:
+                logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (message)")
                 await update.message.reply_photo(
                     photo=IMAGE_MAIN, 
                     caption=text, 
@@ -867,6 +883,7 @@ class GardenHorizonsBot:
                     reply_markup=reply_markup
                 )
             elif update.callback_query:
+                logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (callback)")
                 await update.callback_query.edit_message_media(
                     media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
                     reply_markup=reply_markup
@@ -874,7 +891,8 @@ class GardenHorizonsBot:
             
             return False
         
-        # Пользователь подписан - добавляем в БД
+        # Пользователь подписан - добавляем в БД (если еще не добавлен)
+        logger.info(f"✅ Пользователь {user.id} подписан на все каналы")
         add_user_to_db(user.id, user.username or user.first_name)
         return True
     
@@ -1070,6 +1088,7 @@ class GardenHorizonsBot:
             else:
                 chat = await self.application.bot.get_chat(int(channel_id))
             
+            # Проверяем, является ли бот администратором канала
             bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 logger.error(f"❌ Бот не является администратором канала {channel_id}")
@@ -1595,19 +1614,32 @@ class GardenHorizonsBot:
             logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
             return
         
-        # Обработка проверки подписки
+        # ГЛАВНОЕ: Обработка кнопки проверки подписки
         if query.data == "check_subscription":
-            logger.info(f"✅ Проверка подписки пользователя {user.id}")
+            logger.info(f"✅ Нажата кнопка 'Я ПОДПИСАЛСЯ' пользователем {user.id}")
+            
+            # Проверяем подписку
             is_subscribed = await self.check_subscription(user.id)
             
             if is_subscribed:
                 # Пользователь подписан - добавляем в БД и показываем меню
+                logger.info(f"✅ Пользователь {user.id} подписался на все каналы")
                 add_user_to_db(user.id, user.username or user.first_name)
-                await query.message.delete()
-                await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                
+                # Удаляем сообщение с проверкой
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+                
+                # Отправляем подтверждение
+                await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                
+                # Показываем главное меню
                 await self.show_main_menu(query.message)
             else:
                 # Пользователь не подписан - показываем alert
+                logger.info(f"❌ Пользователь {user.id} не подписался на все каналы")
                 await query.answer("❌ Вы еще не подписались на все каналы!", show_alert=True)
             return
         

@@ -67,7 +67,9 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = 1, 2
+ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = 3, 4
+MAILING_TEXT = 5
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -1404,11 +1406,11 @@ class GardenHorizonsBot:
             await self.show_op_menu(query)
             return
         
-        # Добавление канала в ОП
+        # Добавление канала в ОП - ConversationHandler
         if query.data == "add_op":
             if not settings.is_admin:
                 return
-            # Передаем управление ConversationHandler - ничего не делаем
+            # Передаем управление ConversationHandler
             return
         
         # Удаление канала из ОП
@@ -1439,7 +1441,7 @@ class GardenHorizonsBot:
             await self.show_post_menu(query)
             return
         
-        # Добавление канала в автопостинг
+        # Добавление канала в автопостинг - ConversationHandler
         if query.data == "add_post":
             if not settings.is_admin:
                 return
@@ -1474,7 +1476,7 @@ class GardenHorizonsBot:
             await self.show_stats(query)
             return
         
-        # Рассылка
+        # Рассылка - ConversationHandler
         if query.data == "admin_mailing":
             if not settings.is_admin:
                 return

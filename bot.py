@@ -923,13 +923,19 @@ class GardenHorizonsBot:
         
         stats = get_stats()
         
-        # ПРОСТЫЕ ПОНЯТНЫЕ КНОПКИ
+        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
-            [InlineKeyboardButton("🔐 УПРАВЛЕНИЕ ОП", callback_data="admin_op")],
-            [InlineKeyboardButton("📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ", callback_data="admin_post")],
-            [InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing")],
-            [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")],
-            [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
+            [
+                InlineKeyboardButton("🔐 ОП", callback_data="admin_op"),
+                InlineKeyboardButton("📢 АВТОПОСТИНГ", callback_data="admin_post")
+            ],
+            [
+                InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing"),
+                InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")
+            ],
+            [
+                InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")
+            ]
         ]
         
         text = (
@@ -940,7 +946,6 @@ class GardenHorizonsBot:
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
         )
         
-        # Отправляем новое сообщение (не редактируем старое)
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_admin_panel_callback(self, query):
@@ -949,13 +954,18 @@ class GardenHorizonsBot:
         
         stats = get_stats()
         
-        # ПРОСТЫЕ ПОНЯТНЫЕ КНОПКИ
         keyboard = [
-            [InlineKeyboardButton("🔐 УПРАВЛЕНИЕ ОП", callback_data="admin_op")],
-            [InlineKeyboardButton("📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ", callback_data="admin_post")],
-            [InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing")],
-            [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")],
-            [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
+            [
+                InlineKeyboardButton("🔐 ОП", callback_data="admin_op"),
+                InlineKeyboardButton("📢 АВТОПОСТИНГ", callback_data="admin_post")
+            ],
+            [
+                InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing"),
+                InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")
+            ],
+            [
+                InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")
+            ]
         ]
         
         text = (
@@ -966,14 +976,9 @@ class GardenHorizonsBot:
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
         )
         
-        # Используем edit_message_caption вместо edit_message_text
-        await query.edit_message_caption(
-            caption=text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== МЕНЮ НАСТРОЙКИ ОП ==========
+    # ========== УПРАВЛЕНИЕ ОП (ОБЯЗАТЕЛЬНАЯ ПОДПИСКА) ==========
     
     async def show_op_menu(self, query):
         user_id = query.from_user.id
@@ -981,19 +986,14 @@ class GardenHorizonsBot:
         
         keyboard = [
             [InlineKeyboardButton("➕ ДОБАВИТЬ КАНАЛ", callback_data="add_op")],
-            [InlineKeyboardButton("🗑 УДАЛИТЬ КАНАЛ", callback_data="admin_op_remove")],
-            [InlineKeyboardButton("📋 СПИСОК КАНАЛОВ", callback_data="admin_op_list")],
+            [InlineKeyboardButton("🗑 УДАЛИТЬ КАНАЛ", callback_data="op_remove")],
+            [InlineKeyboardButton("📋 СПИСОК КАНАЛОВ", callback_data="op_list")],
             [InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]
         ]
         
-        text = "<b>🔐 УПРАВЛЕНИЕ ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ</b>\n\nВыберите действие:"
+        text = "<b>🔐 УПРАВЛЕНИЕ ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ (ОП)</b>\n\nВыберите действие:"
         
-        # Используем edit_message_caption
-        await query.edit_message_caption(
-            caption=text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # Добавление канала в ОП
     async def add_op_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1076,9 +1076,8 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"op_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")])
         
-        # Используем edit_message_caption
         await query.edit_message_caption(
-            caption="🗑 <b>Выберите канал для удаления:</b>",
+            caption="🗑 <b>Выберите канал для удаления из ОП:</b>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1102,20 +1101,15 @@ class GardenHorizonsBot:
         if not self.required_channels:
             text = "📭 Нет каналов в обязательной подписке"
         else:
-            text = "<b>📋 КАНАЛЫ ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ</b>\n\n"
+            text = "<b>📋 КАНАЛЫ ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ (ОП)</b>\n\n"
             for ch in self.required_channels:
                 text += f"• {ch['name']} (ID: {ch['id']})\n"
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")]]
         
-        # Используем edit_message_caption
-        await query.edit_message_caption(
-            caption=text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== МЕНЮ АВТОПОСТИНГА ==========
+    # ========== УПРАВЛЕНИЕ АВТОПОСТИНГОМ ==========
     
     async def show_post_menu(self, query):
         user_id = query.from_user.id
@@ -1123,19 +1117,14 @@ class GardenHorizonsBot:
         
         keyboard = [
             [InlineKeyboardButton("➕ ДОБАВИТЬ КАНАЛ", callback_data="add_post")],
-            [InlineKeyboardButton("🗑 УДАЛИТЬ КАНАЛ", callback_data="admin_post_remove")],
-            [InlineKeyboardButton("📋 СПИСОК КАНАЛОВ", callback_data="admin_post_list")],
+            [InlineKeyboardButton("🗑 УДАЛИТЬ КАНАЛ", callback_data="post_remove")],
+            [InlineKeyboardButton("📋 СПИСОК КАНАЛОВ", callback_data="post_list")],
             [InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]
         ]
         
         text = "<b>📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ</b>\n\nВыберите действие:"
         
-        # Используем edit_message_caption
-        await query.edit_message_caption(
-            caption=text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # Добавление канала для автопостинга
     async def add_post_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1217,7 +1206,6 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"post_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")])
         
-        # Используем edit_message_caption
         await query.edit_message_caption(
             caption="🗑 <b>Выберите канал для удаления из автопостинга:</b>",
             parse_mode='HTML',
@@ -1249,12 +1237,7 @@ class GardenHorizonsBot:
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")]]
         
-        # Используем edit_message_caption
-        await query.edit_message_caption(
-            caption=text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # ========== РАССЫЛКА ==========
     
@@ -1363,12 +1346,7 @@ class GardenHorizonsBot:
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]]
         
-        # Используем edit_message_caption
-        await query.edit_message_caption(
-            caption=text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
     
@@ -1423,7 +1401,7 @@ class GardenHorizonsBot:
                 )
             return
         
-        # Админ-панель (ГЛАВНАЯ)
+        # Админ-панель
         if query.data == "admin_panel":
             if not settings.is_admin:
                 await query.edit_message_caption(caption="❌ У вас нет прав доступа!")
@@ -1446,14 +1424,14 @@ class GardenHorizonsBot:
             return
         
         # Удаление канала из ОП
-        if query.data == "admin_op_remove":
+        if query.data == "op_remove":
             if not settings.is_admin:
                 return
             await self.show_op_remove(query)
             return
         
         # Список каналов ОП
-        if query.data == "admin_op_list":
+        if query.data == "op_list":
             if not settings.is_admin:
                 return
             await self.show_op_list(query)
@@ -1481,14 +1459,14 @@ class GardenHorizonsBot:
             return
         
         # Удаление канала из автопостинга
-        if query.data == "admin_post_remove":
+        if query.data == "post_remove":
             if not settings.is_admin:
                 return
             await self.show_post_remove(query)
             return
         
         # Список каналов автопостинга
-        if query.data == "admin_post_list":
+        if query.data == "post_list":
             if not settings.is_admin:
                 return
             await self.show_post_list(query)

@@ -750,6 +750,7 @@ class GardenHorizonsBot:
         self.required_channels = get_required_channels()
         self.posting_channels = get_posting_channels()
         logger.info(f"🔄 Каналы перезагружены. ОП: {len(self.required_channels)}, Автопостинг: {len(self.posting_channels)}")
+        return self.required_channels
     
     def setup_conversation_handlers(self):
         """Создание ConversationHandler"""
@@ -840,15 +841,15 @@ class GardenHorizonsBot:
         Допустимые статусы: MEMBER, ADMINISTRATOR, OWNER, RESTRICTED
         """
         # ВАЖНО: Перезагружаем каналы перед каждой проверкой
-        self.reload_channels()
+        channels = self.reload_channels()
         
-        if not self.required_channels:
+        if not channels:
             logger.info(f"Нет обязательных каналов для пользователя {user_id}")
             return True
         
-        logger.info(f"🔍 Проверка подписки для пользователя {user_id} на {len(self.required_channels)} каналов")
+        logger.info(f"🔍 Проверка подписки для пользователя {user_id} на {len(channels)} каналов")
         
-        for channel in self.required_channels:
+        for channel in channels:
             try:
                 channel_id_str = channel['id']
                 channel_name = channel['name']
@@ -909,10 +910,10 @@ class GardenHorizonsBot:
         
         if not is_subscribed:
             # ВАЖНО: Перезагружаем каналы для отображения актуального списка
-            self.reload_channels()
+            channels = self.reload_channels()
             
             channels_text = ""
-            for ch in self.required_channels:
+            for ch in channels:
                 channels_text += f"▪️ <b>{ch['name']}</b>\n"
             
             text = (
@@ -924,7 +925,7 @@ class GardenHorizonsBot:
             )
             
             keyboard = []
-            for ch in self.required_channels:
+            for ch in channels:
                 keyboard.append([InlineKeyboardButton(f"📢 {ch['name']}", url=ch['link'])])
             keyboard.append([InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data="check_subscription")])
             
@@ -1188,7 +1189,6 @@ class GardenHorizonsBot:
         """Показ списка каналов для удаления из ОП"""
         if not self.required_channels:
             await query.message.reply_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
-            await self.show_op_menu(query)
             return
         
         text = "🗑 <b>Выберите канал для удаления из ОП:</b>"
@@ -1207,10 +1207,9 @@ class GardenHorizonsBot:
         # ВАЖНО: Перезагружаем каналы сразу после удаления
         self.reload_channels()
         
-        # ИСПРАВЛЕНИЕ: Изменено сообщение
+        # ИСПРАВЛЕНИЕ: Только одно сообщение об удалении
         await query.answer("✅ Канал удален из ОП!")
         await query.message.reply_text("✅ <b>Канал удален из ОП!</b>", parse_mode='HTML')
-        await self.show_op_remove(query)
     
     async def show_op_list(self, query):
         """Показ списка каналов ОП"""

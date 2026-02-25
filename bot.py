@@ -76,9 +76,7 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = range(2)
-ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = range(2, 4)
-MAILING_TEXT = 4
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -758,7 +756,6 @@ class GardenHorizonsBot:
         self.required_channels = get_required_channels()  # Загружаем из БД
         self.posting_channels = get_posting_channels()    # Загружаем из БД
         self.mailing_text = None
-        self.mailing_target = None
         self.message_queue = MessageQueue(delay=0.1)
         self.message_queue.application = self.application
         self.session = requests.Session()
@@ -968,7 +965,7 @@ class GardenHorizonsBot:
         settings = self.user_manager.get_user(user.id)
         settings.notifications_enabled = False
         update_user_setting(user.id, 'notifications_enabled', False)
-        await update.message.reply_html("<b>✅ Уведомления успешно выключены</b>")
+        await update.message.reply_html("<b>❌ Уведомления успешно выключены</b>")
     
     async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда для открытия админ-панели"""
@@ -1567,7 +1564,7 @@ class GardenHorizonsBot:
             await self.show_stock_callback(query)
             return
         
-        # ========== ИСПРАВЛЕНИЕ: Уведомления НЕ закрывают меню ==========
+        # ========== ИСПРАВЛЕНИЕ: Уведомления с эмодзи и НЕ закрывают меню ==========
         if query.data == "notifications_on":
             settings.notifications_enabled = True
             update_user_setting(user.id, 'notifications_enabled', True)
@@ -1579,7 +1576,7 @@ class GardenHorizonsBot:
             settings.notifications_enabled = False
             update_user_setting(user.id, 'notifications_enabled', False)
             # Отправляем НОВОЕ сообщение, не трогая старое
-            await query.message.reply_html("<b>✅ Уведомления выключены</b>")
+            await query.message.reply_html("<b>❌ Уведомления выключены</b>")
             return
         
         if query.data == "settings_seeds":

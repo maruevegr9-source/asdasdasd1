@@ -335,9 +335,9 @@ def add_required_channel(channel_id: str, name: str, link: str):
         )
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал ОП добавлен: {name} ({channel_id})")
+        logger.info(f"✅ Канал ОП добавлен в БД: {name} ({channel_id})")
     except Exception as e:
-        logger.error(f"❌ Ошибка добавления канала ОП: {e}")
+        logger.error(f"❌ Ошибка добавления канала ОП в БД: {e}")
 
 def remove_required_channel(channel_id: str):
     try:
@@ -346,9 +346,9 @@ def remove_required_channel(channel_id: str):
         cur.execute("DELETE FROM required_channels WHERE channel_id = ?", (str(channel_id),))
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал ОП удален: {channel_id}")
+        logger.info(f"✅ Канал ОП удален из БД: {channel_id}")
     except Exception as e:
-        logger.error(f"❌ Ошибка удаления канала ОП: {e}")
+        logger.error(f"❌ Ошибка удаления канала ОП из БД: {e}")
 
 # ----- КАНАЛЫ ДЛЯ АВТОПОСТИНГА -----
 
@@ -378,9 +378,9 @@ def add_posting_channel(channel_id: str, name: str, username: str = None):
         )
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал автопостинга добавлен: {name} ({channel_id})")
+        logger.info(f"✅ Канал автопостинга добавлен в БД: {name} ({channel_id})")
     except Exception as e:
-        logger.error(f"❌ Ошибка добавления канала автопостинга: {e}")
+        logger.error(f"❌ Ошибка добавления канала автопостинга в БД: {e}")
 
 def remove_posting_channel(channel_id: str):
     try:
@@ -389,9 +389,9 @@ def remove_posting_channel(channel_id: str):
         cur.execute("DELETE FROM posting_channels WHERE channel_id = ?", (str(channel_id),))
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал автопостинга удален: {channel_id}")
+        logger.info(f"✅ Канал автопостинга удален из БД: {channel_id}")
     except Exception as e:
-        logger.error(f"❌ Ошибка удаления канала автопостинга: {e}")
+        logger.error(f"❌ Ошибка удаления канала автопостинга из БД: {e}")
 
 # ----- ОТПРАВЛЕННЫЕ УВЕДОМЛЕНИЯ -----
 
@@ -672,8 +672,8 @@ class GardenHorizonsBot:
         self.application = Application.builder().token(token).build()
         self.user_manager = UserManager()
         self.last_data: Optional[Dict] = None
-        self.required_channels = get_required_channels()
-        self.posting_channels = get_posting_channels()
+        self.required_channels = get_required_channels()  # Загружаем при старте
+        self.posting_channels = get_posting_channels()    # Загружаем при старте
         self.mailing_text = None
         self.message_queue = MessageQueue(delay=0.1)
         self.message_queue.application = self.application
@@ -692,6 +692,12 @@ class GardenHorizonsBot:
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
         logger.info(f"📢 Каналов ОП: {len(self.required_channels)}")
         logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
+    
+    def reload_channels(self):
+        """Перезагружает каналы из БД"""
+        self.required_channels = get_required_channels()
+        self.posting_channels = get_posting_channels()
+        logger.info(f"🔄 Каналы перезагружены. ОП: {len(self.required_channels)}, Автопостинг: {len(self.posting_channels)}")
     
     def setup_conversation_handlers(self):
         """Создание ConversationHandler"""
@@ -781,11 +787,14 @@ class GardenHorizonsBot:
         Проверяет, подписан ли пользователь на все обязательные каналы
         Допустимые статусы: MEMBER, ADMINISTRATOR, OWNER, RESTRICTED
         """
+        # ВАЖНО: Перезагружаем каналы перед каждой проверкой
+        self.reload_channels()
+        
         if not self.required_channels:
             logger.info(f"Нет обязательных каналов для пользователя {user_id}")
             return True
         
-        logger.info(f"🔍 Проверка подписки для пользователя {user_id}")
+        logger.info(f"🔍 Проверка подписки для пользователя {user_id} на {len(self.required_channels)} каналов")
         
         for channel in self.required_channels:
             try:
@@ -847,6 +856,9 @@ class GardenHorizonsBot:
         is_subscribed = await self.check_subscription(user.id)
         
         if not is_subscribed:
+            # ВАЖНО: Перезагружаем каналы для отображения актуального списка
+            self.reload_channels()
+            
             channels_text = ""
             for ch in self.required_channels:
                 channels_text += f"▪️ <b>{ch['name']}</b>\n"
@@ -977,6 +989,8 @@ class GardenHorizonsBot:
             await update.message.reply_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
             return
         
+        # ВАЖНО: Перезагружаем каналы перед показом админ-панели
+        self.reload_channels()
         await self.show_admin_panel(update)
     
     # ========== АДМИН-ПАНЕЛЬ ==========
@@ -1026,7 +1040,6 @@ class GardenHorizonsBot:
             [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
         
-        # ВАЖНО: Отправляем новое сообщение вместо редактирования
         await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # ========== УПРАВЛЕНИЕ ОП ==========
@@ -1101,11 +1114,14 @@ class GardenHorizonsBot:
             
             channel_link = f"https://t.me/{chat.username}" if chat.username else f"https://t.me/c/{str(chat.id).replace('-100', '')}"
             add_required_channel(str(chat.id), channel_name, channel_link)
-            self.required_channels = get_required_channels()
             
-            logger.info(f"✅ Канал ОП успешно добавлен: {channel_name} ({channel_id})")
+            # ВАЖНО: Перезагружаем каналы сразу после добавления
+            self.reload_channels()
+            
+            logger.info(f"✅ Канал ОП успешно добавлен и загружен: {channel_name} ({channel_id})")
             await update.message.reply_text(
-                f"✅ <b>Канал {channel_name} добавлен в обязательную подписку!</b>",
+                f"✅ <b>Канал {channel_name} добавлен в обязательную подписку!</b>\n"
+                f"📊 Теперь в ОП {len(self.required_channels)} каналов",
                 parse_mode='HTML'
             )
             
@@ -1135,7 +1151,9 @@ class GardenHorizonsBot:
         """Удаление канала из ОП"""
         channel_id = query.data.replace('op_del_', '')
         remove_required_channel(channel_id)
-        self.required_channels = get_required_channels()
+        
+        # ВАЖНО: Перезагружаем каналы сразу после удаления
+        self.reload_channels()
         
         await query.answer("✅ Канал удален!")
         await self.show_op_remove(query)
@@ -1224,11 +1242,14 @@ class GardenHorizonsBot:
                 return ConversationHandler.END
             
             add_posting_channel(str(chat.id), channel_name, chat.username)
-            self.posting_channels = get_posting_channels()
             
-            logger.info(f"✅ Канал автопостинга успешно добавлен: {channel_name} ({channel_id})")
+            # ВАЖНО: Перезагружаем каналы сразу после добавления
+            self.reload_channels()
+            
+            logger.info(f"✅ Канал автопостинга успешно добавлен и загружен: {channel_name} ({channel_id})")
             await update.message.reply_text(
-                f"✅ <b>Канал {channel_name} добавлен для автопостинга!</b>",
+                f"✅ <b>Канал {channel_name} добавлен для автопостинга!</b>\n"
+                f"📊 Теперь в автопостинге {len(self.posting_channels)} каналов",
                 parse_mode='HTML'
             )
             
@@ -1258,7 +1279,9 @@ class GardenHorizonsBot:
         """Удаление канала из автопостинга"""
         channel_id = query.data.replace('post_del_', '')
         remove_posting_channel(channel_id)
-        self.posting_channels = get_posting_channels()
+        
+        # ВАЖНО: Перезагружаем каналы сразу после удаления
+        self.reload_channels()
         
         await query.answer("✅ Канал удален!")
         await self.show_post_remove(query)

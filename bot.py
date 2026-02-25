@@ -67,9 +67,7 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = 1, 2
-ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = 3, 4
-MAILING_TEXT = 5
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -942,6 +940,7 @@ class GardenHorizonsBot:
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
         )
         
+        # Отправляем новое сообщение (не редактируем старое)
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_admin_panel_callback(self, query):
@@ -967,7 +966,12 @@ class GardenHorizonsBot:
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
         )
         
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption вместо edit_message_text
+        await query.edit_message_caption(
+            caption=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     # ========== МЕНЮ НАСТРОЙКИ ОП ==========
     
@@ -984,7 +988,12 @@ class GardenHorizonsBot:
         
         text = "<b>🔐 УПРАВЛЕНИЕ ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ</b>\n\nВыберите действие:"
         
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        await query.edit_message_caption(
+            caption=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     # Добавление канала в ОП
     async def add_op_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -994,12 +1003,11 @@ class GardenHorizonsBot:
         await query.answer()
         
         if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
         
-        await query.edit_message_text(
-            "📢 <b>Добавление канала в обязательную подписку</b>\n\n"
-            "Отправьте ID канала (например: -1001234567890) или username (@channel):",
+        await query.edit_message_caption(
+            caption="📢 <b>Добавление канала в обязательную подписку</b>\n\nОтправьте ID канала (например: -1001234567890) или username (@channel):",
             parse_mode='HTML'
         )
         return ADD_OP_CHANNEL_ID
@@ -1059,7 +1067,7 @@ class GardenHorizonsBot:
         logger.info(f"🗑 Открытие меню удаления канала ОП пользователем {user_id}")
         
         if not self.required_channels:
-            await query.edit_message_text("📭 Нет каналов для удаления")
+            await query.edit_message_caption(caption="📭 Нет каналов для удаления")
             await self.show_op_menu(query)
             return
         
@@ -1068,8 +1076,9 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"op_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")])
         
-        await query.edit_message_text(
-            "🗑 <b>Выберите канал для удаления:</b>",
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        await query.edit_message_caption(
+            caption="🗑 <b>Выберите канал для удаления:</b>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1082,7 +1091,7 @@ class GardenHorizonsBot:
         remove_required_channel(channel_id)
         self.required_channels = get_required_channels()
         
-        await query.edit_message_text("✅ Канал удален из обязательной подписки!")
+        await query.edit_message_caption(caption="✅ Канал удален из обязательной подписки!")
         await self.show_op_menu(query)
     
     # Список каналов ОП
@@ -1098,7 +1107,13 @@ class GardenHorizonsBot:
                 text += f"• {ch['name']} (ID: {ch['id']})\n"
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")]]
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        await query.edit_message_caption(
+            caption=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     # ========== МЕНЮ АВТОПОСТИНГА ==========
     
@@ -1115,7 +1130,12 @@ class GardenHorizonsBot:
         
         text = "<b>📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ</b>\n\nВыберите действие:"
         
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        await query.edit_message_caption(
+            caption=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     # Добавление канала для автопостинга
     async def add_post_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1125,12 +1145,11 @@ class GardenHorizonsBot:
         await query.answer()
         
         if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
         
-        await query.edit_message_text(
-            "📢 <b>Добавление канала для автопостинга</b>\n\n"
-            "Отправьте ID канала (например: -1001234567890) или username (@channel):",
+        await query.edit_message_caption(
+            caption="📢 <b>Добавление канала для автопостинга</b>\n\nОтправьте ID канала (например: -1001234567890) или username (@channel):",
             parse_mode='HTML'
         )
         return ADD_POST_CHANNEL_ID
@@ -1189,7 +1208,7 @@ class GardenHorizonsBot:
         logger.info(f"🗑 Открытие меню удаления канала автопостинга пользователем {user_id}")
         
         if not self.posting_channels:
-            await query.edit_message_text("📭 Нет каналов для удаления")
+            await query.edit_message_caption(caption="📭 Нет каналов для удаления")
             await self.show_post_menu(query)
             return
         
@@ -1198,8 +1217,9 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"post_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")])
         
-        await query.edit_message_text(
-            "🗑 <b>Выберите канал для удаления из автопостинга:</b>",
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        await query.edit_message_caption(
+            caption="🗑 <b>Выберите канал для удаления из автопостинга:</b>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1212,7 +1232,7 @@ class GardenHorizonsBot:
         remove_posting_channel(channel_id)
         self.posting_channels = get_posting_channels()
         
-        await query.edit_message_text("✅ Канал удален из автопостинга!")
+        await query.edit_message_caption(caption="✅ Канал удален из автопостинга!")
         await self.show_post_menu(query)
     
     # Список каналов автопостинга
@@ -1228,7 +1248,13 @@ class GardenHorizonsBot:
                 text += f"• {ch['name']} (ID: {ch['id']})\n"
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")]]
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        await query.edit_message_caption(
+            caption=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     # ========== РАССЫЛКА ==========
     
@@ -1239,11 +1265,11 @@ class GardenHorizonsBot:
         await query.answer()
         
         if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ У вас нет прав!")
+            await query.edit_message_caption(caption="❌ У вас нет прав!")
             return ConversationHandler.END
         
-        await query.edit_message_text(
-            "📧 <b>Рассылка</b>\n\nВведите текст для рассылки:",
+        await query.edit_message_caption(
+            caption="📧 <b>Рассылка</b>\n\nВведите текст для рассылки:",
             parse_mode='HTML'
         )
         return MAILING_TEXT
@@ -1275,19 +1301,19 @@ class GardenHorizonsBot:
         
         if query.data == "mailing_no":
             logger.info(f"❌ Отмена рассылки пользователем {user_id}")
-            await query.edit_message_text("❌ Рассылка отменена")
+            await query.edit_message_caption(caption="❌ Рассылка отменена")
             await self.show_admin_panel_callback(query)
             return
         
         text = context.user_data.get('mailing_text', '')
         if not text:
             logger.error(f"❌ Текст рассылки не найден для пользователя {user_id}")
-            await query.edit_message_text("❌ Ошибка: текст не найден")
+            await query.edit_message_caption(caption="❌ Ошибка: текст не найден")
             await self.show_admin_panel_callback(query)
             return
         
         logger.info(f"📧 Подтверждение рассылки пользователем {user_id}")
-        await query.edit_message_text("📧 Начинаю рассылку...")
+        await query.edit_message_caption(caption="📧 Начинаю рассылку...")
         
         success = 0
         failed = 0
@@ -1336,7 +1362,13 @@ class GardenHorizonsBot:
         )
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]]
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        await query.edit_message_caption(
+            caption=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
     # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
     
@@ -1394,7 +1426,7 @@ class GardenHorizonsBot:
         # Админ-панель (ГЛАВНАЯ)
         if query.data == "admin_panel":
             if not settings.is_admin:
-                await query.edit_message_text("❌ У вас нет прав доступа!")
+                await query.edit_message_caption(caption="❌ У вас нет прав доступа!")
                 return
             await self.show_admin_panel_callback(query)
             return

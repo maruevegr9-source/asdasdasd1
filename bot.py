@@ -1237,6 +1237,7 @@ class GardenHorizonsBot:
         self.reload_channels()
         
         await query.answer("✅ Канал удален из ОП!")
+        await query.message.reply_text("✅ <b>Канал удален из ОП!</b>", parse_mode='HTML')
         await self.show_op_remove(query)
     
     async def show_op_list(self, query):

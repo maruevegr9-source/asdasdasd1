@@ -20,7 +20,7 @@ from telegram.error import RetryAfter, TimedOut
 # Загружаем переменные окружения
 load_dotenv()
 
-# ========== НАСТРОЙКА ЛОГИРОВАНИЯ (В САМОМ НАЧАЛЕ!) ==========
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -44,6 +44,13 @@ ADMIN_ID = 8025951500
 if os.environ.get('RAILWAY_ENVIRONMENT'):
     DB_PATH = "/data/bot.db"
     logger.info("✅ Работаем на Railway, БД в /data/bot.db")
+    
+    # Проверяем и создаем папку /data
+    try:
+        os.makedirs('/data', exist_ok=True)
+        logger.info(f"📁 Папка /data создана/существует")
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания папки /data: {e}")
 else:
     DB_PATH = "bot.db"
     logger.info("✅ Локальная разработка, БД в bot.db")
@@ -103,77 +110,87 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 
 def init_database():
     """Создает все необходимые таблицы в базе данных"""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    
-    # Таблица пользователей
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_seen TEXT,
-            notifications_enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    # Таблица обязательных каналов (ОП)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS required_channels (
-            channel_id TEXT PRIMARY KEY,
-            name TEXT,
-            link TEXT,
-            added_at TEXT
-        )
-    """)
-    
-    # Таблица каналов для автопостинга
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS posting_channels (
-            channel_id TEXT PRIMARY KEY,
-            name TEXT,
-            username TEXT,
-            added_at TEXT
-        )
-    """)
-    
-    # Таблица для истории отправленных уведомлений
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sent_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            item_name TEXT,
-            quantity INTEGER,
-            sent_at TEXT,
-            UNIQUE(chat_id, item_name, quantity)
-        )
-    """)
-    
-    # Таблица для настроек пользователей по предметам
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_items (
-            user_id INTEGER,
-            item_name TEXT,
-            enabled INTEGER DEFAULT 1,
-            PRIMARY KEY (user_id, item_name)
-        )
-    """)
-    
-    # Таблица для отслеживания отправленных обновлений пользователям
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_updates (
-            user_id INTEGER,
-            update_id TEXT,
-            sent_at TEXT,
-            PRIMARY KEY (user_id, update_id)
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
-    logger.info("✅ База данных инициализирована")
+    try:
+        # Пробуем создать соединение
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        logger.info(f"✅ Подключение к БД успешно: {DB_PATH}")
+        
+        # Таблица пользователей
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_seen TEXT,
+                notifications_enabled INTEGER DEFAULT 1
+            )
+        """)
+        
+        # Таблица обязательных каналов (ОП)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS required_channels (
+                channel_id TEXT PRIMARY KEY,
+                name TEXT,
+                link TEXT,
+                added_at TEXT
+            )
+        """)
+        
+        # Таблица каналов для автопостинга
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS posting_channels (
+                channel_id TEXT PRIMARY KEY,
+                name TEXT,
+                username TEXT,
+                added_at TEXT
+            )
+        """)
+        
+        # Таблица для истории отправленных уведомлений
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sent_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                item_name TEXT,
+                quantity INTEGER,
+                sent_at TEXT,
+                UNIQUE(chat_id, item_name, quantity)
+            )
+        """)
+        
+        # Таблица для настроек пользователей по предметам
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_items (
+                user_id INTEGER,
+                item_name TEXT,
+                enabled INTEGER DEFAULT 1,
+                PRIMARY KEY (user_id, item_name)
+            )
+        """)
+        
+        # Таблица для отслеживания отправленных обновлений пользователям
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_updates (
+                user_id INTEGER,
+                update_id TEXT,
+                sent_at TEXT,
+                PRIMARY KEY (user_id, update_id)
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+        logger.info("✅ База данных инициализирована успешно")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации БД: {e}")
+        return False
 
-# Вызываем инициализацию при запуске
-init_database()
+# Инициализируем БД
+db_initialized = init_database()
+if not db_initialized and os.environ.get('RAILWAY_ENVIRONMENT'):
+    logger.error("❌ НЕ УДАЛОСЬ ИНИЦИАЛИЗИРОВАТЬ БД! Проверьте Volume на Railway")
 
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ==========
 
@@ -185,250 +202,317 @@ def get_db():
 
 def add_user_to_db(user_id: int, username: str = ""):
     """Добавляет или обновляет пользователя в БД"""
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # Проверяем, есть ли уже пользователь
-    cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if cur.fetchone():
-        # Обновляем username если изменился
-        cur.execute(
-            "UPDATE users SET username = ? WHERE user_id = ?",
-            (username, user_id)
-        )
-    else:
-        # Добавляем нового пользователя
-        cur.execute(
-            "INSERT INTO users (user_id, username, first_seen) VALUES (?, ?, ?)",
-            (user_id, username, datetime.now().isoformat())
-        )
-        # Добавляем все предметы в user_items
-        for item in SEEDS_LIST + GEAR_LIST + WEATHER_LIST:
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # Проверяем, есть ли уже пользователь
+        cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        if cur.fetchone():
+            # Обновляем username если изменился
             cur.execute(
-                "INSERT INTO user_items (user_id, item_name, enabled) VALUES (?, ?, 1)",
-                (user_id, item)
+                "UPDATE users SET username = ? WHERE user_id = ?",
+                (username, user_id)
             )
-    
-    conn.commit()
-    conn.close()
-    logger.info(f"✅ Пользователь {user_id} ({username}) добавлен/обновлен в БД")
+        else:
+            # Добавляем нового пользователя
+            cur.execute(
+                "INSERT INTO users (user_id, username, first_seen) VALUES (?, ?, ?)",
+                (user_id, username, datetime.now().isoformat())
+            )
+            # Добавляем все предметы в user_items
+            for item in SEEDS_LIST + GEAR_LIST + WEATHER_LIST:
+                cur.execute(
+                    "INSERT INTO user_items (user_id, item_name, enabled) VALUES (?, ?, 1)",
+                    (user_id, item)
+                )
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Пользователь {user_id} ({username}) добавлен/обновлен в БД")
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления пользователя {user_id}: {e}")
 
 def get_user_settings(user_id: int) -> Dict:
     """Получает настройки пользователя из БД"""
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # Основные настройки
-    cur.execute(
-        "SELECT notifications_enabled FROM users WHERE user_id = ?",
-        (user_id,)
-    )
-    result = cur.fetchone()
-    notifications_enabled = bool(result[0]) if result else True
-    
-    # Настройки предметов
-    cur.execute(
-        "SELECT item_name, enabled FROM user_items WHERE user_id = ?",
-        (user_id,)
-    )
-    items = {row[0]: bool(row[1]) for row in cur.fetchall()}
-    
-    conn.close()
-    
-    return {
-        'notifications_enabled': notifications_enabled,
-        'seeds': {item: items.get(item, True) for item in SEEDS_LIST},
-        'gear': {item: items.get(item, True) for item in GEAR_LIST},
-        'weather': {item: items.get(item, True) for item in WEATHER_LIST}
-    }
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # Основные настройки
+        cur.execute(
+            "SELECT notifications_enabled FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        result = cur.fetchone()
+        notifications_enabled = bool(result[0]) if result else True
+        
+        # Настройки предметов
+        cur.execute(
+            "SELECT item_name, enabled FROM user_items WHERE user_id = ?",
+            (user_id,)
+        )
+        items = {row[0]: bool(row[1]) for row in cur.fetchall()}
+        
+        conn.close()
+        
+        return {
+            'notifications_enabled': notifications_enabled,
+            'seeds': {item: items.get(item, True) for item in SEEDS_LIST},
+            'gear': {item: items.get(item, True) for item in GEAR_LIST},
+            'weather': {item: items.get(item, True) for item in WEATHER_LIST}
+        }
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения настроек пользователя {user_id}: {e}")
+        return {
+            'notifications_enabled': True,
+            'seeds': {item: True for item in SEEDS_LIST},
+            'gear': {item: True for item in GEAR_LIST},
+            'weather': {item: True for item in WEATHER_LIST}
+        }
 
 def update_user_setting(user_id: int, setting: str, value: Any):
     """Обновляет настройку пользователя"""
-    conn = get_db()
-    cur = conn.cursor()
-    
-    if setting == 'notifications_enabled':
-        cur.execute(
-            "UPDATE users SET notifications_enabled = ? WHERE user_id = ?",
-            (1 if value else 0, user_id)
-        )
-    elif setting.startswith('seed_') or setting.startswith('gear_') or setting.startswith('weather_'):
-        item_name = setting.replace('seed_', '').replace('gear_', '').replace('weather_', '')
-        cur.execute(
-            "UPDATE user_items SET enabled = ? WHERE user_id = ? AND item_name = ?",
-            (1 if value else 0, user_id, item_name)
-        )
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        if setting == 'notifications_enabled':
+            cur.execute(
+                "UPDATE users SET notifications_enabled = ? WHERE user_id = ?",
+                (1 if value else 0, user_id)
+            )
+        elif setting.startswith('seed_') or setting.startswith('gear_') or setting.startswith('weather_'):
+            item_name = setting.replace('seed_', '').replace('gear_', '').replace('weather_', '')
+            cur.execute(
+                "UPDATE user_items SET enabled = ? WHERE user_id = ? AND item_name = ?",
+                (1 if value else 0, user_id, item_name)
+            )
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления настройки {setting} для {user_id}: {e}")
 
 def get_all_users() -> List[int]:
     """Возвращает список всех user_id"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users")
-    users = [row[0] for row in cur.fetchall()]
-    conn.close()
-    return users
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users")
+        users = [row[0] for row in cur.fetchall()]
+        conn.close()
+        return users
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+        return []
 
 def get_users_count() -> int:
     """Возвращает количество пользователей"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    count = cur.fetchone()[0]
-    conn.close()
-    return count
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        count = cur.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения количества пользователей: {e}")
+        return 0
 
 # ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) -----
 
 def get_required_channels() -> List[Dict]:
     """Возвращает список обязательных каналов"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT channel_id, name, link FROM required_channels ORDER BY added_at")
-    channels = [
-        {'id': row[0], 'name': row[1], 'link': row[2]}
-        for row in cur.fetchall()
-    ]
-    conn.close()
-    return channels
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT channel_id, name, link FROM required_channels ORDER BY added_at")
+        channels = [
+            {'id': row[0], 'name': row[1], 'link': row[2]}
+            for row in cur.fetchall()
+        ]
+        conn.close()
+        return channels
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения каналов ОП: {e}")
+        return []
 
 def add_required_channel(channel_id: str, name: str, link: str):
     """Добавляет канал в обязательную подписку"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO required_channels (channel_id, name, link, added_at) VALUES (?, ?, ?, ?)",
-        (channel_id, name, link, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
-    logger.info(f"✅ Канал ОП добавлен: {name} ({channel_id})")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO required_channels (channel_id, name, link, added_at) VALUES (?, ?, ?, ?)",
+            (channel_id, name, link, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Канал ОП добавлен: {name} ({channel_id})")
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления канала ОП: {e}")
 
 def remove_required_channel(channel_id: str):
     """Удаляет канал из обязательной подписки"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM required_channels WHERE channel_id = ?", (channel_id,))
-    conn.commit()
-    conn.close()
-    logger.info(f"✅ Канал ОП удален: {channel_id}")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM required_channels WHERE channel_id = ?", (channel_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Канал ОП удален: {channel_id}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления канала ОП: {e}")
 
 # ----- КАНАЛЫ ДЛЯ АВТОПОСТИНГА -----
 
 def get_posting_channels() -> List[Dict]:
     """Возвращает список каналов для автопостинга"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT channel_id, name, username FROM posting_channels ORDER BY added_at")
-    channels = [
-        {'id': row[0], 'name': row[1], 'username': row[2]}
-        for row in cur.fetchall()
-    ]
-    conn.close()
-    return channels
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT channel_id, name, username FROM posting_channels ORDER BY added_at")
+        channels = [
+            {'id': row[0], 'name': row[1], 'username': row[2]}
+            for row in cur.fetchall()
+        ]
+        conn.close()
+        return channels
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения каналов автопостинга: {e}")
+        return []
 
 def add_posting_channel(channel_id: str, name: str, username: str = None):
     """Добавляет канал для автопостинга"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO posting_channels (channel_id, name, username, added_at) VALUES (?, ?, ?, ?)",
-        (channel_id, name, username, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
-    logger.info(f"✅ Канал автопостинга добавлен: {name} ({channel_id})")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO posting_channels (channel_id, name, username, added_at) VALUES (?, ?, ?, ?)",
+            (channel_id, name, username, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Канал автопостинга добавлен: {name} ({channel_id})")
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления канала автопостинга: {e}")
 
 def remove_posting_channel(channel_id: str):
     """Удаляет канал из автопостинга"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM posting_channels WHERE channel_id = ?", (channel_id,))
-    conn.commit()
-    conn.close()
-    logger.info(f"✅ Канал автопостинга удален: {channel_id}")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM posting_channels WHERE channel_id = ?", (channel_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ Канал автопостинга удален: {channel_id}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления канала автопостинга: {e}")
 
 # ----- ОТПРАВЛЕННЫЕ УВЕДОМЛЕНИЯ -----
 
 def was_item_sent(chat_id: int, item_name: str, quantity: int) -> bool:
     """Проверяет, отправлялось ли уже такое уведомление"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COUNT(*) FROM sent_items WHERE chat_id = ? AND item_name = ? AND quantity = ?",
-        (chat_id, item_name, quantity)
-    )
-    count = cur.fetchone()[0]
-    conn.close()
-    return count > 0
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM sent_items WHERE chat_id = ? AND item_name = ? AND quantity = ?",
+            (chat_id, item_name, quantity)
+        )
+        count = cur.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки отправленного: {e}")
+        return False
 
 def mark_item_sent(chat_id: int, item_name: str, quantity: int):
     """Отмечает, что уведомление отправлено"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO sent_items (chat_id, item_name, quantity, sent_at) VALUES (?, ?, ?, ?)",
-        (chat_id, item_name, quantity, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO sent_items (chat_id, item_name, quantity, sent_at) VALUES (?, ?, ?, ?)",
+            (chat_id, item_name, quantity, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка отметки отправленного: {e}")
 
 def was_update_sent(user_id: int, update_id: str) -> bool:
     """Проверяет, отправлялось ли уже это обновление пользователю"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COUNT(*) FROM user_updates WHERE user_id = ? AND update_id = ?",
-        (user_id, update_id)
-    )
-    count = cur.fetchone()[0]
-    conn.close()
-    return count > 0
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM user_updates WHERE user_id = ? AND update_id = ?",
+            (user_id, update_id)
+        )
+        count = cur.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки обновления пользователя: {e}")
+        return False
 
 def mark_update_sent(user_id: int, update_id: str):
     """Отмечает, что обновление отправлено пользователю"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO user_updates (user_id, update_id, sent_at) VALUES (?, ?, ?)",
-        (user_id, update_id, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO user_updates (user_id, update_id, sent_at) VALUES (?, ?, ?)",
+            (user_id, update_id, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка отметки обновления пользователя: {e}")
 
 # ----- СТАТИСТИКА -----
 
 def get_stats() -> Dict:
     """Возвращает статистику бота"""
-    conn = get_db()
-    cur = conn.cursor()
-    
-    cur.execute("SELECT COUNT(*) FROM users")
-    users_count = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM required_channels")
-    op_count = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM posting_channels")
-    post_count = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM sent_items")
-    sent_count = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM user_updates")
-    updates_count = cur.fetchone()[0]
-    
-    conn.close()
-    
-    return {
-        'users': users_count,
-        'op_channels': op_count,
-        'posting_channels': post_count,
-        'sent_notifications': sent_count,
-        'user_updates': updates_count
-    }
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM users")
+        users_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM required_channels")
+        op_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM posting_channels")
+        post_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM sent_items")
+        sent_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM user_updates")
+        updates_count = cur.fetchone()[0]
+        
+        conn.close()
+        
+        return {
+            'users': users_count,
+            'op_channels': op_count,
+            'posting_channels': post_count,
+            'sent_notifications': sent_count,
+            'user_updates': updates_count
+        }
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики: {e}")
+        return {
+            'users': 0,
+            'op_channels': 0,
+            'posting_channels': 0,
+            'sent_notifications': 0,
+            'user_updates': 0
+        }
 
 # ========== КЛАССЫ ==========
 
@@ -618,6 +702,7 @@ class GardenHorizonsBot:
         self.required_channels = get_required_channels()  # Загружаем из БД
         self.posting_channels = get_posting_channels()    # Загружаем из БД
         self.mailing_text = None
+        self.mailing_target = None
         self.message_queue = MessageQueue(delay=0.1)
         self.message_queue.application = self.application
         self.session = requests.Session()
@@ -1399,16 +1484,12 @@ class GardenHorizonsBot:
             settings.notifications_enabled = True
             update_user_setting(user.id, 'notifications_enabled', True)
             await query.edit_message_caption(caption="<b>✅ Уведомления включены!</b>", parse_mode='HTML')
-            await asyncio.sleep(1)
-            await self.show_main_menu_callback(query)
             return
         
         if query.data == "notifications_off":
             settings.notifications_enabled = False
             update_user_setting(user.id, 'notifications_enabled', False)
             await query.edit_message_caption(caption="<b>✅ Уведомления выключены</b>", parse_mode='HTML')
-            await asyncio.sleep(1)
-            await self.show_main_menu_callback(query)
             return
         
         if query.data == "settings_seeds":
@@ -1680,11 +1761,12 @@ class GardenHorizonsBot:
     
     def format_channel_message(self, item_name: str, quantity: int) -> str:
         translated = translate(item_name)
+        emoji = "✨" if quantity > 0 else "❌"
         return (
-            f"✨ <b>{translated}</b>\n"
-            f"<b>Количество:</b> {quantity} шт.\n"
+            f"{emoji} <b>{translated}</b>\n"
+            f"📦 <b>Количество:</b> {quantity} шт.\n"
             f"━━━━━━━━━━━━━━\n"
-            f"<a href='{DEFAULT_REQUIRED_CHANNEL_LINK}'>Наш канал</a> | <a href='{BOT_LINK}'>Авто-сток</a> | <a href='{CHAT_LINK}'>Наш чат</a>\n"
+            f"<a href='{DEFAULT_REQUIRED_CHANNEL_LINK}'>📢 Наш канал</a> | <a href='{BOT_LINK}'>🤖 Авто-сток</a> | <a href='{CHAT_LINK}'>💬 Наш чат</a>\n"
             f"━━━━━━━━━━━━━━\n"
             f"👀 Включи уведомления в канале!"
         )
@@ -1700,7 +1782,7 @@ class GardenHorizonsBot:
             translated = translate(item_name)
             if item_name in WEATHER_LIST:
                 # Для погоды - специальный формат
-                message += f"<b>Активна погода!</b> {translated}\n"
+                message += f"<b>🌤️ Активна погода!</b> {translated}\n"
             else:
                 # Для семян и снаряжения - с количеством
                 message += f"<b>{translated}:</b> {quantity} шт.\n"

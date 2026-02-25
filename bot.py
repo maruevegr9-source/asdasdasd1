@@ -66,9 +66,7 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = range(2)
-ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = range(2, 4)
-MAILING_TEXT, MAILING_CONFIRM = range(4, 6)
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -111,7 +109,6 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 def init_database():
     """Создает все необходимые таблицы в базе данных"""
     try:
-        # Пробуем создать соединение
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         logger.info(f"✅ Подключение к БД успешно: {DB_PATH}")
@@ -729,7 +726,8 @@ class GardenHorizonsBot:
                 ADD_OP_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_op_id)],
                 ADD_OP_CHANNEL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_op_name)],
             },
-            fallbacks=[CommandHandler("cancel", self.cancel)],
+            fallbacks=[CommandHandler("cancel", self.cancel_op)],
+            name="add_op_conversation"
         )
         
         # 2. Диалог добавления канала для автопостинга
@@ -739,7 +737,8 @@ class GardenHorizonsBot:
                 ADD_POST_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_post_id)],
                 ADD_POST_CHANNEL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_post_name)],
             },
-            fallbacks=[CommandHandler("cancel", self.cancel)],
+            fallbacks=[CommandHandler("cancel", self.cancel_post)],
+            name="add_post_conversation"
         )
         
         # 3. Диалог рассылки
@@ -747,9 +746,9 @@ class GardenHorizonsBot:
             entry_points=[CallbackQueryHandler(self.mailing_start, pattern="^mailing$")],
             states={
                 MAILING_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.mailing_get_text)],
-                MAILING_CONFIRM: [CallbackQueryHandler(self.mailing_confirm, pattern="^(mailing_yes|mailing_no)$")],
             },
-            fallbacks=[CommandHandler("cancel", self.cancel)],
+            fallbacks=[CommandHandler("cancel", self.cancel_mailing)],
+            name="mailing_conversation"
         )
         
         self.application.add_handler(add_op_conv)
@@ -767,13 +766,27 @@ class GardenHorizonsBot:
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
     
-    # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+    # ========== ФУНКЦИИ ОТМЕНЫ ==========
     
-    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отмена действия"""
-        await update.message.reply_text("❌ Действие отменено")
+    async def cancel_op(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена добавления канала ОП"""
+        await update.message.reply_text("❌ Добавление канала отменено")
         await self.show_admin_panel(update)
         return ConversationHandler.END
+    
+    async def cancel_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена добавления канала автопостинга"""
+        await update.message.reply_text("❌ Добавление канала отменено")
+        await self.show_admin_panel(update)
+        return ConversationHandler.END
+    
+    async def cancel_mailing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена рассылки"""
+        await update.message.reply_text("❌ Рассылка отменена")
+        await self.show_admin_panel(update)
+        return ConversationHandler.END
+    
+    # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
     
     async def check_subscription(self, user_id: int) -> bool:
         """Проверяет подписку на ВСЕ обязательные каналы"""
@@ -1249,7 +1262,7 @@ class GardenHorizonsBot:
         return MAILING_TEXT
     
     async def mailing_get_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получает текст и запрашивает подтверждение"""
+        """Получает текст и отправляет рассылку с подтверждением"""
         text = update.message.text
         context.user_data['mailing_text'] = text
         
@@ -1263,7 +1276,9 @@ class GardenHorizonsBot:
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return MAILING_CONFIRM
+        
+        # Ждем ответа от пользователя через отдельный обработчик
+        return ConversationHandler.END
     
     async def mailing_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Подтверждение или отмена рассылки"""
@@ -1273,9 +1288,15 @@ class GardenHorizonsBot:
         if query.data == "mailing_no":
             await query.edit_message_text("❌ Рассылка отменена")
             await self.show_admin_panel_callback(query)
-            return ConversationHandler.END
+            return
         
+        # Получаем текст из контекста
         text = context.user_data.get('mailing_text', '')
+        if not text:
+            await query.edit_message_text("❌ Ошибка: текст не найден")
+            await self.show_admin_panel_callback(query)
+            return
+        
         await query.edit_message_text("📧 Начинаю рассылку...")
         
         success = 0
@@ -1302,7 +1323,6 @@ class GardenHorizonsBot:
         )
         
         await self.show_admin_panel_callback(query)
-        return ConversationHandler.END
     
     # ========== СТАТИСТИКА ==========
     
@@ -1457,9 +1477,16 @@ class GardenHorizonsBot:
             await self.show_stats(query)
             return
         
-        # Обработка удаления каналов (передаем в ConversationHandler)
+        # Рассылка подтверждение
+        if query.data in ["mailing_yes", "mailing_no"]:
+            if not settings.is_admin:
+                return
+            await self.mailing_confirm(update, context)
+            return
+        
+        # Обработка добавления каналов (передаем в ConversationHandler)
         if query.data in ["add_op", "add_post", "mailing"]:
-            # Передаем управление ConversationHandler
+            # Эти обрабатываются ConversationHandler
             return
         
         # Основное меню (для всех пользователей)
@@ -1778,14 +1805,22 @@ class GardenHorizonsBot:
         
         message = "<b>🔔 НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n\n"
         
-        for item_name, quantity in items:
+        # Сортируем: сначала погода, потом семена, потом снаряжение
+        weather_items = [i for i in items if i[0] in WEATHER_LIST]
+        seed_items = [i for i in items if i[0] in SEEDS_LIST]
+        gear_items = [i for i in items if i[0] in GEAR_LIST]
+        
+        for item_name, quantity in weather_items:
             translated = translate(item_name)
-            if item_name in WEATHER_LIST:
-                # Для погоды - специальный формат
-                message += f"<b>🌤️ Активна погода!</b> {translated}\n"
-            else:
-                # Для семян и снаряжения - с количеством
-                message += f"<b>{translated}:</b> {quantity} шт.\n"
+            message += f"<b>🌤️ Активна погода!</b> {translated}\n"
+        
+        for item_name, quantity in seed_items:
+            translated = translate(item_name)
+            message += f"<b>{translated}:</b> {quantity} шт.\n"
+        
+        for item_name, quantity in gear_items:
+            translated = translate(item_name)
+            message += f"<b>{translated}:</b> {quantity} шт.\n"
         
         return message
     
@@ -1798,12 +1833,11 @@ class GardenHorizonsBot:
             old_seeds = {s["name"]: s["quantity"] for s in old_data.get("seeds", [])}
             new_seeds = {s["name"]: s["quantity"] for s in new_data["seeds"]}
             
-            all_names = set(old_seeds.keys()) | set(new_seeds.keys())
-            for name in all_names:
+            # Берем ВСЕ имена из нового стока
+            for name, new_q in new_seeds.items():
                 if name not in TRANSLATIONS:
                     continue
                 old_q = old_seeds.get(name, 0)
-                new_q = new_seeds.get(name, 0)
                 if new_q > old_q:
                     changes[name] = new_q
                     logger.info(f"✅ {name} изменилось: {old_q} → {new_q}")
@@ -1813,12 +1847,10 @@ class GardenHorizonsBot:
             old_gear = {g["name"]: g["quantity"] for g in old_data.get("gear", [])}
             new_gear = {g["name"]: g["quantity"] for g in new_data["gear"]}
             
-            all_names = set(old_gear.keys()) | set(new_gear.keys())
-            for name in all_names:
+            for name, new_q in new_gear.items():
                 if name not in TRANSLATIONS:
                     continue
                 old_q = old_gear.get(name, 0)
-                new_q = new_gear.get(name, 0)
                 if new_q > old_q:
                     changes[name] = new_q
                     logger.info(f"✅ {name} изменилось: {old_q} → {new_q}")

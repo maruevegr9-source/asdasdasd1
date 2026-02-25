@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import assi
+import asyncio
 import asyncio
 import random
 import sqlite3

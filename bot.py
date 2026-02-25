@@ -107,6 +107,22 @@ def is_rare(item_name: str) -> bool:
 def is_allowed_for_main_channel(item_name: str) -> bool:
     return item_name in ALLOWED_CHANNEL_ITEMS
 
+def is_weather_active(weather_data: Dict) -> bool:
+    """Проверяет, активна ли погода с учетом времени окончания"""
+    if not weather_data or not weather_data.get("active"):
+        return False
+    
+    ends_at = weather_data.get("endsAt", "")
+    if not ends_at:
+        return True
+    
+    try:
+        ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
+        now = datetime.now(ends_time.tzinfo)
+        return now < ends_time
+    except:
+        return True
+
 # ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 
 def init_database():
@@ -177,6 +193,15 @@ def init_database():
                 sent_at TEXT,
                 update_id TEXT,
                 PRIMARY KEY (user_id, item_name, update_id)
+            )
+        """)
+        
+        # Таблица для отслеживания закончившейся погоды
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS weather_ended (
+                update_id TEXT PRIMARY KEY,
+                weather_type TEXT,
+                ended_at TEXT
             )
         """)
         
@@ -451,6 +476,33 @@ def mark_item_sent(chat_id: int, item_name: str, quantity: int):
     except Exception as e:
         logger.error(f"❌ Ошибка отметки отправленного: {e}")
 
+def was_weather_ended(update_id: str) -> bool:
+    """Проверяет, было ли уже отправлено уведомление о конце погоды"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM weather_ended WHERE update_id = ?", (update_id,))
+        count = cur.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки окончания погоды: {e}")
+        return False
+
+def mark_weather_ended(update_id: str, weather_type: str):
+    """Отмечает, что уведомление о конце погоды отправлено"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR IGNORE INTO weather_ended (update_id, weather_type, ended_at) VALUES (?, ?, ?)",
+            (update_id, weather_type, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка отметки окончания погоды: {e}")
+
 # ----- СТАТИСТИКА -----
 
 def get_stats() -> Dict:
@@ -672,8 +724,8 @@ class GardenHorizonsBot:
         self.application = Application.builder().token(token).build()
         self.user_manager = UserManager()
         self.last_data: Optional[Dict] = None
-        self.required_channels = get_required_channels()  # Загружаем при старте
-        self.posting_channels = get_posting_channels()    # Загружаем при старте
+        self.required_channels = get_required_channels()
+        self.posting_channels = get_posting_channels()
         self.mailing_text = None
         self.message_queue = MessageQueue(delay=0.1)
         self.message_queue.application = self.application
@@ -1155,7 +1207,9 @@ class GardenHorizonsBot:
         # ВАЖНО: Перезагружаем каналы сразу после удаления
         self.reload_channels()
         
-        await query.answer("✅ Канал удален!")
+        # ИСПРАВЛЕНИЕ: Изменено сообщение
+        await query.answer("✅ Канал удален из ОП!")
+        await query.message.reply_text("✅ <b>Канал удален из ОП!</b>", parse_mode='HTML')
         await self.show_op_remove(query)
     
     async def show_op_list(self, query):
@@ -1283,7 +1337,8 @@ class GardenHorizonsBot:
         # ВАЖНО: Перезагружаем каналы сразу после удаления
         self.reload_channels()
         
-        await query.answer("✅ Канал удален!")
+        await query.answer("✅ Канал удален из автопостинга!")
+        await query.message.reply_text("✅ <b>Канал удален из автопостинга!</b>", parse_mode='HTML')
         await self.show_post_remove(query)
     
     async def show_post_list(self, query):
@@ -1840,23 +1895,21 @@ class GardenHorizonsBot:
             if gear:
                 parts.append("<b>⚙️ СНАРЯЖЕНИЕ:</b>\n" + "\n".join(gear))
         
-        if "weather" in data and data["weather"].get("active"):
-            wtype = data["weather"]["type"]
-            ends_at = data["weather"].get("endsAt", "")
-            
-            if ends_at:
-                try:
-                    ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
-                    now = datetime.now(ends_time.tzinfo)
-                    if now < ends_time:
-                        if wtype in TRANSLATIONS:
-                            time_str = ends_time.strftime("%H:%M:%S")
-                            parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {time_str}")
-                except:
-                    if wtype in TRANSLATIONS:
+        # ИСПРАВЛЕНИЕ: Проверяем, активна ли погода с учетом времени окончания
+        if "weather" in data:
+            weather_data = data["weather"]
+            if is_weather_active(weather_data):
+                wtype = weather_data["type"]
+                ends_at = weather_data.get("endsAt", "")
+                
+                if ends_at and wtype in TRANSLATIONS:
+                    try:
+                        ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
+                        time_str = ends_time.strftime("%H:%M:%S")
+                        parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {time_str}")
+                    except:
                         parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
-            else:
-                if wtype in TRANSLATIONS:
+                elif wtype in TRANSLATIONS:
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
         
         return "\n\n".join(parts) if parts else None
@@ -1896,6 +1949,11 @@ class GardenHorizonsBot:
         
         return message
     
+    def format_weather_ended_message(self, weather_type: str) -> str:
+        """Формирует сообщение о конце погоды"""
+        translated = translate(weather_type)
+        return f"<b>🌤️ Погода {translated} закончилась!</b>"
+    
     def get_all_current_items(self, data: Dict) -> Dict[str, int]:
         all_items = {}
         
@@ -1911,25 +1969,34 @@ class GardenHorizonsBot:
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
         
-        if "weather" in data and data["weather"].get("active"):
-            wtype = data["weather"].get("type")
-            ends_at = data["weather"].get("endsAt", "")
-            
-            if ends_at:
-                try:
-                    ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
-                    now = datetime.now(ends_time.tzinfo)
-                    if now < ends_time:
-                        if wtype and wtype in TRANSLATIONS:
-                            all_items[wtype] = 1
-                except:
-                    if wtype and wtype in TRANSLATIONS:
-                        all_items[wtype] = 1
-            else:
+        # ИСПРАВЛЕНИЕ: Добавляем погоду ТОЛЬКО если она активна
+        if "weather" in data:
+            weather_data = data["weather"]
+            if is_weather_active(weather_data):
+                wtype = weather_data.get("type")
                 if wtype and wtype in TRANSLATIONS:
                     all_items[wtype] = 1
         
         return all_items
+    
+    def get_weather_ended(self, old_data: Dict, new_data: Dict) -> Optional[str]:
+        """Проверяет, закончилась ли погода"""
+        if not old_data or not new_data:
+            return None
+        
+        old_weather = old_data.get("weather", {})
+        new_weather = new_data.get("weather", {})
+        
+        old_active = is_weather_active(old_weather)
+        new_active = is_weather_active(new_weather)
+        
+        # Погода была активна, а теперь неактивна
+        if old_active and not new_active:
+            weather_type = old_weather.get("type")
+            if weather_type and weather_type in TRANSLATIONS:
+                return weather_type
+        
+        return None
     
     def get_user_items_to_send(self, all_items: Dict[str, int], settings: UserSettings, user_id: int, update_id: str) -> List[tuple]:
         user_items = []
@@ -1961,6 +2028,27 @@ class GardenHorizonsBot:
                 new_data = self.fetch_api_data(force=True)
                 
                 if new_data and self.last_data:
+                    # Проверяем, закончилась ли погода
+                    ended_weather = self.get_weather_ended(self.last_data, new_data)
+                    
+                    if ended_weather:
+                        logger.info(f"✅ Погода {ended_weather} закончилась!")
+                        update_id = f"weather_ended_{datetime.now().isoformat()}"
+                        
+                        if not was_weather_ended(update_id):
+                            # Отправляем уведомление о конце погоды пользователям
+                            users = get_all_users()
+                            message = self.format_weather_ended_message(ended_weather)
+                            
+                            for user_id in users:
+                                settings = self.user_manager.get_user(user_id)
+                                if await self.check_subscription(user_id) and settings.notifications_enabled:
+                                    if settings.weather.get(ended_weather, ItemSettings()).enabled:
+                                        await self.message_queue.queue.put((user_id, message, 'HTML', None))
+                            
+                            mark_weather_ended(update_id, ended_weather)
+                    
+                    # Проверяем изменения в стоке
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
                         logger.info(f"✅ Обнаружены изменения в API!")
                         

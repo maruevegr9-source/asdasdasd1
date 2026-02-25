@@ -5,7 +5,7 @@ import random
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Set
-from dataclasses import dataclass, field  # ЭТОТ ИМПОРТ БЫЛ ПРОПУЩЕН!
+from dataclasses import dataclass, field
 from collections import defaultdict
 from enum import Enum
 
@@ -126,7 +126,7 @@ def init_database():
             )
         """)
         
-        # Таблица обязательных каналов (ОП) - ЭТО ГЛАВНОЕ!
+        # Таблица обязательных каналов (ОП)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS required_channels (
                 channel_id TEXT PRIMARY KEY,
@@ -307,7 +307,7 @@ def get_users_count() -> int:
         logger.error(f"❌ Ошибка получения количества пользователей: {e}")
         return 0
 
-# ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) - ОСНОВНАЯ ФУНКЦИЯ -----
+# ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) -----
 
 def get_required_channels() -> List[Dict]:
     try:
@@ -789,31 +789,26 @@ class GardenHorizonsBot:
         
         for channel in self.required_channels:
             try:
-                # Преобразуем ID в число для API Telegram
                 channel_id_str = channel['id']
                 channel_name = channel['name']
                 
                 logger.info(f"  Проверка канала: {channel_name} ({channel_id_str})")
                 
-                # Определяем chat_id для запроса
                 if channel_id_str.startswith('@'):
                     chat_id = channel_id_str
                 else:
-                    # Пробуем преобразовать в число
                     try:
                         chat_id = int(channel_id_str)
                     except ValueError:
                         logger.error(f"  ❌ Не удалось преобразовать ID канала: {channel_id_str}")
                         return False
                 
-                # Получаем информацию о пользователе в канале
                 try:
                     member = await self.application.bot.get_chat_member(
                         chat_id=chat_id, 
                         user_id=user_id
                     )
                     
-                    # Проверяем статус
                     if member.status not in [
                         ChatMember.MEMBER, 
                         ChatMember.ADMINISTRATOR, 
@@ -827,7 +822,6 @@ class GardenHorizonsBot:
                         
                 except Exception as e:
                     logger.error(f"  ❌ Ошибка получения информации о подписке: {e}")
-                    # В случае ошибки считаем, что пользователь не подписан
                     return False
                     
             except Exception as e:
@@ -845,17 +839,14 @@ class GardenHorizonsBot:
         user = update.effective_user
         settings = self.user_manager.get_user(user.id)
         
-        # Админ всегда имеет доступ
         if settings.is_admin:
             logger.info(f"👑 Админ {user.id} пропущен без проверки подписки")
             return True
         
-        # Проверяем подписку
         logger.info(f"🔍 require_subscription для пользователя {user.id}")
         is_subscribed = await self.check_subscription(user.id)
         
         if not is_subscribed:
-            # Формируем текст с каналами
             channels_text = ""
             for ch in self.required_channels:
                 channels_text += f"▪️ <b>{ch['name']}</b>\n"
@@ -868,7 +859,6 @@ class GardenHorizonsBot:
                 "<b>После подписки нажми кнопку ниже 👇</b>"
             )
             
-            # Создаем клавиатуру с кнопками каналов и кнопкой проверки
             keyboard = []
             for ch in self.required_channels:
                 keyboard.append([InlineKeyboardButton(f"📢 {ch['name']}", url=ch['link'])])
@@ -876,7 +866,6 @@ class GardenHorizonsBot:
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Отправляем сообщение в зависимости от типа update
             if update.message:
                 logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (message)")
                 await update.message.reply_photo(
@@ -887,14 +876,21 @@ class GardenHorizonsBot:
                 )
             elif update.callback_query:
                 logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (callback)")
-                await update.callback_query.edit_message_media(
-                    media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
-                    reply_markup=reply_markup
-                )
+                try:
+                    await update.callback_query.edit_message_media(
+                        media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
+                        reply_markup=reply_markup
+                    )
+                except:
+                    await update.callback_query.message.reply_photo(
+                        photo=IMAGE_MAIN, 
+                        caption=text, 
+                        parse_mode='HTML', 
+                        reply_markup=reply_markup
+                    )
             
             return False
         
-        # Пользователь подписан - добавляем в БД (если еще не добавлен)
         logger.info(f"✅ Пользователь {user.id} подписан на все каналы")
         add_user_to_db(user.id, user.username or user.first_name)
         return True
@@ -1008,7 +1004,7 @@ class GardenHorizonsBot:
         if update.message:
             await update.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            await update.callback_query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.callback_query.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_admin_panel_callback(self, query):
         """Показ админ-панели из callback"""
@@ -1030,9 +1026,10 @@ class GardenHorizonsBot:
             [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
         
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        # ВАЖНО: Отправляем новое сообщение вместо редактирования
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== УПРАВЛЕНИЕ ОП (ОБЯЗАТЕЛЬНАЯ ПОДПИСКА) ==========
+    # ========== УПРАВЛЕНИЕ ОП ==========
     
     async def show_op_menu(self, query):
         """Меню управления ОП"""
@@ -1049,7 +1046,7 @@ class GardenHorizonsBot:
             [InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]
         ]
         
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def add_op_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Начало добавления канала в ОП"""
@@ -1059,10 +1056,10 @@ class GardenHorizonsBot:
         await query.answer()
         
         if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
+            await query.message.reply_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
             return ConversationHandler.END
         
-        await query.edit_message_text(
+        await query.message.reply_text(
             "📢 <b>Добавление канала в обязательную подписку</b>\n\n"
             "Отправьте <b>ID канала</b> (например: -1001234567890) или <b>username</b> (@channel):",
             parse_mode='HTML'
@@ -1091,7 +1088,6 @@ class GardenHorizonsBot:
             else:
                 chat = await self.application.bot.get_chat(int(channel_id))
             
-            # Проверяем, является ли бот администратором канала
             bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 logger.error(f"❌ Бот не является администратором канала {channel_id}")
@@ -1123,7 +1119,7 @@ class GardenHorizonsBot:
     async def show_op_remove(self, query):
         """Показ списка каналов для удаления из ОП"""
         if not self.required_channels:
-            await query.edit_message_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
+            await query.message.reply_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
             await self.show_op_menu(query)
             return
         
@@ -1133,7 +1129,7 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"op_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")])
         
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def delete_op_channel(self, query):
         """Удаление канала из ОП"""
@@ -1154,9 +1150,9 @@ class GardenHorizonsBot:
                 text += f"• <b>{ch['name']}</b> (ID: <code>{ch['id']}</code>)\n"
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")]]
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== УПРАВЛЕНИЕ АВТОПОСТИНГОМ (ДРУГИЕ КАНАЛЫ) ==========
+    # ========== УПРАВЛЕНИЕ АВТОПОСТИНГОМ ==========
     
     async def show_post_menu(self, query):
         """Меню управления автопостингом"""
@@ -1174,7 +1170,7 @@ class GardenHorizonsBot:
             [InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]
         ]
         
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def add_post_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Начало добавления канала в автопостинг"""
@@ -1184,10 +1180,10 @@ class GardenHorizonsBot:
         await query.answer()
         
         if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
+            await query.message.reply_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
             return ConversationHandler.END
         
-        await query.edit_message_text(
+        await query.message.reply_text(
             "📢 <b>Добавление канала для автопостинга</b>\n\n"
             "Отправьте <b>ID канала</b> (например: -1001234567890) или <b>username</b> (@channel):",
             parse_mode='HTML'
@@ -1246,7 +1242,7 @@ class GardenHorizonsBot:
     async def show_post_remove(self, query):
         """Показ списка каналов для удаления из автопостинга"""
         if not self.posting_channels:
-            await query.edit_message_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
+            await query.message.reply_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
             await self.show_post_menu(query)
             return
         
@@ -1256,7 +1252,7 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"post_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")])
         
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def delete_post_channel(self, query):
         """Удаление канала из автопостинга"""
@@ -1277,7 +1273,7 @@ class GardenHorizonsBot:
                 text += f"• <b>{ch['name']}</b> (ID: <code>{ch['id']}</code>)\n"
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")]]
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # ========== РАССЫЛКА ==========
     
@@ -1289,14 +1285,10 @@ class GardenHorizonsBot:
         await query.answer()
         
         if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
+            await query.message.reply_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
             return ConversationHandler.END
         
-        # Очищаем старые данные
-        if 'mailing_text' in context.user_data:
-            del context.user_data['mailing_text']
-        
-        await query.edit_message_text(
+        await query.message.reply_text(
             "📧 <b>Рассылка</b>\n\nВведите текст для рассылки:",
             parse_mode='HTML'
         )
@@ -1330,19 +1322,19 @@ class GardenHorizonsBot:
         
         if query.data == "mailing_no":
             logger.info(f"❌ Отмена рассылки пользователем {user_id}")
-            await query.edit_message_text("❌ <b>Рассылка отменена</b>", parse_mode='HTML')
+            await query.message.reply_text("❌ <b>Рассылка отменена</b>", parse_mode='HTML')
             await self.show_admin_panel_callback(query)
             return
         
         text = context.user_data.get('mailing_text', '')
         if not text:
             logger.error(f"❌ Текст рассылки не найден для пользователя {user_id}")
-            await query.edit_message_text("❌ <b>Ошибка: текст не найден</b>", parse_mode='HTML')
+            await query.message.reply_text("❌ <b>Ошибка: текст не найден</b>", parse_mode='HTML')
             await self.show_admin_panel_callback(query)
             return
         
         logger.info(f"📧 Подтверждение рассылки пользователем {user_id}")
-        await query.edit_message_text("📧 <b>Начинаю рассылку...</b>", parse_mode='HTML')
+        await query.message.reply_text("📧 <b>Начинаю рассылку...</b>", parse_mode='HTML')
         
         success = 0
         failed = 0
@@ -1370,10 +1362,6 @@ class GardenHorizonsBot:
             parse_mode='HTML'
         )
         
-        # Очищаем данные после рассылки
-        if 'mailing_text' in context.user_data:
-            del context.user_data['mailing_text']
-        
         await self.show_admin_panel_callback(query)
     
     # ========== СТАТИСТИКА ==========
@@ -1390,7 +1378,7 @@ class GardenHorizonsBot:
         )
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]]
-        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # ========== ОСНОВНОЕ МЕНЮ ==========
     
@@ -1438,10 +1426,13 @@ class GardenHorizonsBot:
         if settings.is_admin:
             keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
         
-        await query.edit_message_media(
-            media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except:
+            await query.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_main_settings(self, update: Update, settings: UserSettings):
         """Показ настроек"""
@@ -1465,10 +1456,14 @@ class GardenHorizonsBot:
             [InlineKeyboardButton("🌤️ ПОГОДА", callback_data="settings_weather"),
              InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
-        await query.edit_message_media(
-            media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except:
+            await query.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_seeds_settings(self, query, settings: UserSettings):
         """Показ настроек семян"""
@@ -1485,10 +1480,14 @@ class GardenHorizonsBot:
         if row:
             keyboard.append(row)
         keyboard.append([InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")])
-        await query.edit_message_media(
-            media=InputMediaPhoto(media=IMAGE_SEEDS, caption=text, parse_mode='HTML'),
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=IMAGE_SEEDS, caption=text, parse_mode='HTML'),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except:
+            await query.message.reply_photo(photo=IMAGE_SEEDS, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_gear_settings(self, query, settings: UserSettings):
         """Показ настроек снаряжения"""
@@ -1505,10 +1504,14 @@ class GardenHorizonsBot:
         if row:
             keyboard.append(row)
         keyboard.append([InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")])
-        await query.edit_message_media(
-            media=InputMediaPhoto(media=IMAGE_GEAR, caption=text, parse_mode='HTML'),
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=IMAGE_GEAR, caption=text, parse_mode='HTML'),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except:
+            await query.message.reply_photo(photo=IMAGE_GEAR, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_weather_settings(self, query, settings: UserSettings):
         """Показ настроек погоды"""
@@ -1525,10 +1528,14 @@ class GardenHorizonsBot:
         if row:
             keyboard.append(row)
         keyboard.append([InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")])
-        await query.edit_message_media(
-            media=InputMediaPhoto(media=IMAGE_WEATHER, caption=text, parse_mode='HTML'),
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=IMAGE_WEATHER, caption=text, parse_mode='HTML'),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except:
+            await query.message.reply_photo(photo=IMAGE_WEATHER, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_stock_callback(self, query):
         """Показ текущего стока"""
@@ -1590,7 +1597,6 @@ class GardenHorizonsBot:
         user = update.effective_user
         text = update.message.text
         
-        # Проверяем, не находимся ли мы в диалоге
         if context.user_data.get(ADD_OP_CHANNEL_ID) or context.user_data.get(ADD_POST_CHANNEL_ID) or context.user_data.get(MAILING_TEXT):
             return
         
@@ -1612,41 +1618,31 @@ class GardenHorizonsBot:
         
         settings = self.user_manager.get_user(user.id)
         
-        # Пропускаем callback для ConversationHandler
         if query.data in ["add_op", "add_post", "mailing"]:
             logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
             return
         
-        # ГЛАВНОЕ: Обработка кнопки проверки подписки
         if query.data == "check_subscription":
             logger.info(f"✅ Нажата кнопка 'Я ПОДПИСАЛСЯ' пользователем {user.id}")
             
-            # Проверяем подписку
             is_subscribed = await self.check_subscription(user.id)
             
             if is_subscribed:
-                # Пользователь подписан - добавляем в БД и показываем меню
                 logger.info(f"✅ Пользователь {user.id} подписался на все каналы")
                 add_user_to_db(user.id, user.username or user.first_name)
                 
-                # Удаляем сообщение с проверкой
                 try:
                     await query.message.delete()
                 except:
                     pass
                 
-                # Отправляем подтверждение
                 await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
-                
-                # Показываем главное меню
                 await self.show_main_menu(query.message)
             else:
-                # Пользователь не подписан - показываем alert
                 logger.info(f"❌ Пользователь {user.id} не подписался на все каналы")
                 await query.answer("❌ Вы еще не подписались на все каналы!", show_alert=True)
             return
         
-        # Админ-панель
         if query.data == "admin_panel":
             if not settings.is_admin:
                 await query.answer("❌ У вас нет прав!", show_alert=True)
@@ -1654,96 +1650,81 @@ class GardenHorizonsBot:
             await self.show_admin_panel_callback(query)
             return
         
-        # Меню ОП
         if query.data == "admin_op":
             if not settings.is_admin:
                 return
             await self.show_op_menu(query)
             return
         
-        # Удаление из ОП
         if query.data == "op_remove":
             if not settings.is_admin:
                 return
             await self.show_op_remove(query)
             return
         
-        # Список ОП
         if query.data == "op_list":
             if not settings.is_admin:
                 return
             await self.show_op_list(query)
             return
         
-        # Удаление конкретного канала из ОП
         if query.data.startswith("op_del_"):
             if not settings.is_admin:
                 return
             await self.delete_op_channel(query)
             return
         
-        # Меню автопостинга
         if query.data == "admin_post":
             if not settings.is_admin:
                 return
             await self.show_post_menu(query)
             return
         
-        # Удаление из автопостинга
         if query.data == "post_remove":
             if not settings.is_admin:
                 return
             await self.show_post_remove(query)
             return
         
-        # Список автопостинга
         if query.data == "post_list":
             if not settings.is_admin:
                 return
             await self.show_post_list(query)
             return
         
-        # Удаление конкретного канала из автопостинга
         if query.data.startswith("post_del_"):
             if not settings.is_admin:
                 return
             await self.delete_post_channel(query)
             return
         
-        # Статистика
         if query.data == "admin_stats":
             if not settings.is_admin:
                 return
             await self.show_stats(query)
             return
         
-        # Подтверждение рассылки
         if query.data in ["mailing_yes", "mailing_no"]:
             if not settings.is_admin:
                 return
             await self.mailing_confirm(update, context)
             return
         
-        # Проверка подписки для остальных действий
         if not await self.require_subscription(update, context):
             return
         
-        # Главное меню
         if query.data == "menu_main":
             await self.show_main_menu_callback(query)
             return
         
-        # Меню настроек
         if query.data == "menu_settings":
             await self.show_main_settings_callback(query, settings)
             return
         
-        # Сток
         if query.data == "menu_stock":
             await self.show_stock_callback(query)
             return
         
-        # Уведомления
         if query.data == "notifications_on":
             settings.notifications_enabled = True
             update_user_setting(user.id, 'notifications_enabled', True)
@@ -1756,7 +1737,6 @@ class GardenHorizonsBot:
             await query.message.reply_html("<b>❌ Уведомления выключены</b>")
             return
         
-        # Настройки категорий
         if query.data == "settings_seeds":
             await self.show_seeds_settings(query, settings)
             return
@@ -1837,27 +1817,22 @@ class GardenHorizonsBot:
             if gear:
                 parts.append("<b>⚙️ СНАРЯЖЕНИЕ:</b>\n" + "\n".join(gear))
         
-        # Проверяем, активна ли погода
         if "weather" in data and data["weather"].get("active"):
             wtype = data["weather"]["type"]
             ends_at = data["weather"].get("endsAt", "")
             
-            # Проверяем, не закончилась ли погода
             if ends_at:
                 try:
                     ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
                     now = datetime.now(ends_time.tzinfo)
-                    if now < ends_time:  # Погода еще активна
+                    if now < ends_time:
                         if wtype in TRANSLATIONS:
-                            # Форматируем время окончания
                             time_str = ends_time.strftime("%H:%M:%S")
                             parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {time_str}")
                 except:
-                    # Если не удалось распарсить время, просто показываем что активна
                     if wtype in TRANSLATIONS:
                         parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
             else:
-                # Если нет информации о времени окончания, просто показываем что активна
                 if wtype in TRANSLATIONS:
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
         
@@ -1913,25 +1888,21 @@ class GardenHorizonsBot:
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
         
-        # Добавляем погоду ТОЛЬКО если она активна
         if "weather" in data and data["weather"].get("active"):
             wtype = data["weather"].get("type")
             ends_at = data["weather"].get("endsAt", "")
             
-            # Проверяем, не закончилась ли погода
             if ends_at:
                 try:
                     ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
                     now = datetime.now(ends_time.tzinfo)
-                    if now < ends_time:  # Погода еще активна
+                    if now < ends_time:
                         if wtype and wtype in TRANSLATIONS:
                             all_items[wtype] = 1
                 except:
-                    # Если не удалось распарсить время, добавляем погоду
                     if wtype and wtype in TRANSLATIONS:
                         all_items[wtype] = 1
             else:
-                # Если нет информации о времени окончания, добавляем погоду
                 if wtype and wtype in TRANSLATIONS:
                     all_items[wtype] = 1
         
@@ -1977,7 +1948,6 @@ class GardenHorizonsBot:
                             
                             update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
-                            # 1. Отправляем в ОСНОВНОЙ канал
                             main_channel_items = {}
                             for name, qty in all_items.items():
                                 if is_allowed_for_main_channel(name):
@@ -1991,7 +1961,6 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(MAIN_CHANNEL_ID), name, qty)
                                         logger.info(f"📢 В основной канал: {name} = {qty}")
                             
-                            # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
                             for channel in self.posting_channels:
                                 for name, qty in main_channel_items.items():
                                     if not was_item_sent(int(channel['id']), name, qty):
@@ -2000,7 +1969,6 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(channel['id']), name, qty)
                                         logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
                             
-                            # 3. Отправляем пользователям (личные сообщения)
                             users = get_all_users()
                             
                             for user_id in users:

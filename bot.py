@@ -110,17 +110,28 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 def is_weather_active(weather_data: Dict) -> bool:
     """Проверяет, активна ли погода с учетом времени окончания"""
     if not weather_data or not weather_data.get("active"):
+        logger.info(f"🌤️ Погода не активна по флагу active")
         return False
     
     ends_at = weather_data.get("endsAt", "")
     if not ends_at:
+        logger.info(f"🌤️ Погода активна (нет времени окончания)")
         return True
     
     try:
         ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
         now = datetime.now(ends_time.tzinfo)
-        return now < ends_time
-    except:
+        is_active = now < ends_time
+        if is_active:
+            time_left = (ends_time - now).total_seconds()
+            hours = int(time_left // 3600)
+            minutes = int((time_left % 3600) // 60)
+            logger.info(f"🌤️ Погода активна, осталось {hours}ч {minutes}м")
+        else:
+            logger.info(f"🌤️ Погода закончилась в {ends_time}")
+        return is_active
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга времени погоды: {e}")
         return True
 
 # ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
@@ -196,12 +207,15 @@ def init_database():
             )
         """)
         
-        # Таблица для отслеживания закончившейся погоды
+        # Таблица для отслеживания отправленных уведомлений о погоде
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS weather_ended (
-                update_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS weather_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 weather_type TEXT,
-                ended_at TEXT
+                status TEXT,
+                update_id TEXT,
+                sent_at TEXT,
+                UNIQUE(weather_type, status, update_id)
             )
         """)
         
@@ -476,32 +490,36 @@ def mark_item_sent(chat_id: int, item_name: str, quantity: int):
     except Exception as e:
         logger.error(f"❌ Ошибка отметки отправленного: {e}")
 
-def was_weather_ended(update_id: str) -> bool:
-    """Проверяет, было ли уже отправлено уведомление о конце погоды"""
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM weather_ended WHERE update_id = ?", (update_id,))
-        count = cur.fetchone()[0]
-        conn.close()
-        return count > 0
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки окончания погоды: {e}")
-        return False
-
-def mark_weather_ended(update_id: str, weather_type: str):
-    """Отмечает, что уведомление о конце погоды отправлено"""
+def was_weather_notification_sent(weather_type: str, status: str, update_id: str) -> bool:
+    """Проверяет, было ли уже отправлено уведомление о погоде"""
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT OR IGNORE INTO weather_ended (update_id, weather_type, ended_at) VALUES (?, ?, ?)",
-            (update_id, weather_type, datetime.now().isoformat())
+            "SELECT COUNT(*) FROM weather_notifications WHERE weather_type = ? AND status = ? AND update_id = ?",
+            (weather_type, status, update_id)
+        )
+        count = cur.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки уведомления о погоде: {e}")
+        return False
+
+def mark_weather_notification_sent(weather_type: str, status: str, update_id: str):
+    """Отмечает, что уведомление о погоде отправлено"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR IGNORE INTO weather_notifications (weather_type, status, update_id, sent_at) VALUES (?, ?, ?, ?)",
+            (weather_type, status, update_id, datetime.now().isoformat())
         )
         conn.commit()
         conn.close()
+        logger.info(f"📝 Отмечено уведомление о погоде: {weather_type} - {status}")
     except Exception as e:
-        logger.error(f"❌ Ошибка отметки окончания погоды: {e}")
+        logger.error(f"❌ Ошибка отметки уведомления о погоде: {e}")
 
 # ----- СТАТИСТИКА -----
 
@@ -1312,8 +1330,18 @@ class GardenHorizonsBot:
             else:
                 chat = await self.application.bot.get_chat(int(channel_id))
             
-            # Для автопостинга не нужно проверять, является ли бот администратором
-            # Достаточно просто получить информацию о канале
+            # ВОЗВРАЩАЕМ проверку на администратора для автопостинга
+            bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
+            if bot_member.status not in ['administrator', 'creator']:
+                logger.error(f"❌ Бот не является администратором канала {channel_id}")
+                await update.message.reply_text(
+                    "❌ <b>Бот не является администратором этого канала!</b>\n"
+                    "Сделайте бота админом и попробуйте снова.",
+                    parse_mode='HTML'
+                )
+                await self.show_admin_panel(update)
+                return ConversationHandler.END
+            
             logger.info(f"✅ Канал найден: {chat.title} (ID: {chat.id})")
             
             add_posting_channel(str(chat.id), channel_name, chat.username)
@@ -1938,6 +1966,8 @@ class GardenHorizonsBot:
                         parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
                 elif wtype in TRANSLATIONS:
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
+            else:
+                logger.info(f"🌤️ Погода не активна, не добавляем в сообщение")
         
         return "\n\n".join(parts) if parts else None
     
@@ -1981,6 +2011,18 @@ class GardenHorizonsBot:
         translated = translate(weather_type)
         return f"<b>🌤️ Погода {translated} закончилась!</b>"
     
+    def format_weather_started_message(self, weather_type: str, ends_at: str = "") -> str:
+        """Формирует сообщение о начале погоды"""
+        translated = translate(weather_type)
+        if ends_at:
+            try:
+                ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
+                time_str = ends_time.strftime("%H:%M:%S")
+                return f"<b>🌤️ Началась погода {translated}! Активна до {time_str}</b>"
+            except:
+                return f"<b>🌤️ Началась погода {translated}!</b>"
+        return f"<b>🌤️ Началась погода {translated}!</b>"
+    
     def get_all_current_items(self, data: Dict) -> Dict[str, int]:
         all_items = {}
         
@@ -2003,13 +2045,18 @@ class GardenHorizonsBot:
                 wtype = weather_data.get("type")
                 if wtype and wtype in TRANSLATIONS:
                     all_items[wtype] = 1
+                    logger.info(f"🌤️ Добавляем активную погоду: {wtype}")
         
         return all_items
     
-    def get_weather_ended(self, old_data: Dict, new_data: Dict) -> Optional[str]:
-        """Проверяет, закончилась ли погода"""
+    def get_weather_change(self, old_data: Dict, new_data: Dict) -> tuple:
+        """
+        Определяет изменение погоды
+        Возвращает (статус, тип_погоды, время_окончания)
+        статус: 'started', 'ended', None
+        """
         if not old_data or not new_data:
-            return None
+            return None, None, None
         
         old_weather = old_data.get("weather", {})
         new_weather = new_data.get("weather", {})
@@ -2017,13 +2064,25 @@ class GardenHorizonsBot:
         old_active = is_weather_active(old_weather)
         new_active = is_weather_active(new_weather)
         
-        # Погода была активна, а теперь неактивна
-        if old_active and not new_active:
-            weather_type = old_weather.get("type")
-            if weather_type and weather_type in TRANSLATIONS:
-                return weather_type
+        old_type = old_weather.get("type") if old_active else None
+        new_type = new_weather.get("type") if new_active else None
         
-        return None
+        # Погода началась
+        if not old_active and new_active:
+            logger.info(f"🌤️ Погода началась: {new_type}")
+            return 'started', new_type, new_weather.get("endsAt", "")
+        
+        # Погода закончилась
+        if old_active and not new_active:
+            logger.info(f"🌤️ Погода закончилась: {old_type}")
+            return 'ended', old_type, None
+        
+        # Погода изменилась на другой тип
+        if old_active and new_active and old_type != new_type:
+            logger.info(f"🌤️ Погода изменилась: {old_type} -> {new_type}")
+            return 'ended', old_type, None
+        
+        return None, None, None
     
     def get_user_items_to_send(self, all_items: Dict[str, int], settings: UserSettings, user_id: int, update_id: str) -> List[tuple]:
         user_items = []
@@ -2055,25 +2114,33 @@ class GardenHorizonsBot:
                 new_data = self.fetch_api_data(force=True)
                 
                 if new_data and self.last_data:
-                    # Проверяем, закончилась ли погода
-                    ended_weather = self.get_weather_ended(self.last_data, new_data)
+                    # Проверяем изменения в погоде
+                    weather_status, weather_type, ends_at = self.get_weather_change(self.last_data, new_data)
                     
-                    if ended_weather:
-                        logger.info(f"✅ Погода {ended_weather} закончилась!")
-                        update_id = f"weather_ended_{datetime.now().isoformat()}"
+                    if weather_status and weather_type:
+                        update_id = f"weather_{weather_status}_{datetime.now().isoformat()}"
                         
-                        if not was_weather_ended(update_id):
-                            # Отправляем уведомление о конце погоды пользователям
+                        if not was_weather_notification_sent(weather_type, weather_status, update_id):
+                            # Отправляем уведомление о погоде пользователям
                             users = get_all_users()
-                            message = self.format_weather_ended_message(ended_weather)
                             
+                            if weather_status == 'started':
+                                message = self.format_weather_started_message(weather_type, ends_at)
+                            else:  # ended
+                                message = self.format_weather_ended_message(weather_type)
+                            
+                            logger.info(f"🌤️ Отправка уведомления о {weather_status} погоды {weather_type}")
+                            
+                            sent_count = 0
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)
                                 if await self.check_subscription(user_id) and settings.notifications_enabled:
-                                    if settings.weather.get(ended_weather, ItemSettings()).enabled:
+                                    if settings.weather.get(weather_type, ItemSettings()).enabled:
                                         await self.message_queue.queue.put((user_id, message, 'HTML', None))
+                                        sent_count += 1
                             
-                            mark_weather_ended(update_id, ended_weather)
+                            mark_weather_notification_sent(weather_type, weather_status, update_id)
+                            logger.info(f"📤 Уведомление о погоде отправлено {sent_count} пользователям")
                     
                     # Проверяем изменения в стоке
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):

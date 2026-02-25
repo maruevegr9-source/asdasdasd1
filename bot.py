@@ -966,7 +966,7 @@ class GardenHorizonsBot:
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
         )
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption вместо edit_message_text
+        # Используем edit_message_caption вместо edit_message_text
         await query.edit_message_caption(
             caption=text,
             parse_mode='HTML',
@@ -988,7 +988,7 @@ class GardenHorizonsBot:
         
         text = "<b>🔐 УПРАВЛЕНИЕ ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ</b>\n\nВыберите действие:"
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        # Используем edit_message_caption
         await query.edit_message_caption(
             caption=text,
             parse_mode='HTML',
@@ -1076,7 +1076,7 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"op_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")])
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        # Используем edit_message_caption
         await query.edit_message_caption(
             caption="🗑 <b>Выберите канал для удаления:</b>",
             parse_mode='HTML',
@@ -1108,7 +1108,7 @@ class GardenHorizonsBot:
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")]]
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        # Используем edit_message_caption
         await query.edit_message_caption(
             caption=text,
             parse_mode='HTML',
@@ -1130,7 +1130,7 @@ class GardenHorizonsBot:
         
         text = "<b>📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ</b>\n\nВыберите действие:"
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        # Используем edit_message_caption
         await query.edit_message_caption(
             caption=text,
             parse_mode='HTML',
@@ -1217,7 +1217,7 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"post_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")])
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        # Используем edit_message_caption
         await query.edit_message_caption(
             caption="🗑 <b>Выберите канал для удаления из автопостинга:</b>",
             parse_mode='HTML',
@@ -1249,7 +1249,7 @@ class GardenHorizonsBot:
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_post")]]
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        # Используем edit_message_caption
         await query.edit_message_caption(
             caption=text,
             parse_mode='HTML',
@@ -1363,7 +1363,7 @@ class GardenHorizonsBot:
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]]
         
-        # ✅ ИСПРАВЛЕНИЕ: используем edit_message_caption
+        # Используем edit_message_caption
         await query.edit_message_caption(
             caption=text,
             parse_mode='HTML',

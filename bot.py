@@ -67,9 +67,7 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = range(2)
-ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = range(2, 4)
-MAILING_TEXT = 4
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -925,19 +923,13 @@ class GardenHorizonsBot:
         
         stats = get_stats()
         
-        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
+        # ПРОСТЫЕ ПОНЯТНЫЕ КНОПКИ
         keyboard = [
-            [
-                InlineKeyboardButton("🔐 НАСТРОЙКА ОП", callback_data="admin_op"),
-                InlineKeyboardButton("📢 АВТОПОСТИНГ", callback_data="admin_post")
-            ],
-            [
-                InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing"),
-                InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")
-            ],
-            [
-                InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")
-            ]
+            [InlineKeyboardButton("🔐 УПРАВЛЕНИЕ ОП", callback_data="admin_op")],
+            [InlineKeyboardButton("📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ", callback_data="admin_post")],
+            [InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing")],
+            [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")],
+            [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
         
         text = (
@@ -956,19 +948,13 @@ class GardenHorizonsBot:
         
         stats = get_stats()
         
-        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
+        # ПРОСТЫЕ ПОНЯТНЫЕ КНОПКИ
         keyboard = [
-            [
-                InlineKeyboardButton("🔐 НАСТРОЙКА ОП", callback_data="admin_op"),
-                InlineKeyboardButton("📢 АВТОПОСТИНГ", callback_data="admin_post")
-            ],
-            [
-                InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing"),
-                InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")
-            ],
-            [
-                InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")
-            ]
+            [InlineKeyboardButton("🔐 УПРАВЛЕНИЕ ОП", callback_data="admin_op")],
+            [InlineKeyboardButton("📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ", callback_data="admin_post")],
+            [InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing")],
+            [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")],
+            [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
         
         text = (
@@ -987,19 +973,14 @@ class GardenHorizonsBot:
         user_id = query.from_user.id
         logger.info(f"🔐 Открытие меню ОП пользователем {user_id}")
         
-        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
-            [
-                InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data="add_op"),
-                InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data="admin_op_remove")
-            ],
-            [
-                InlineKeyboardButton("📋 СПИСОК", callback_data="admin_op_list"),
-                InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")
-            ]
+            [InlineKeyboardButton("➕ ДОБАВИТЬ КАНАЛ", callback_data="add_op")],
+            [InlineKeyboardButton("🗑 УДАЛИТЬ КАНАЛ", callback_data="admin_op_remove")],
+            [InlineKeyboardButton("📋 СПИСОК КАНАЛОВ", callback_data="admin_op_list")],
+            [InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]
         ]
         
-        text = "<b>🔐 НАСТРОЙКА ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ</b>\n\nВыберите действие:"
+        text = "<b>🔐 УПРАВЛЕНИЕ ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ</b>\n\nВыберите действие:"
         
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
@@ -1123,16 +1104,11 @@ class GardenHorizonsBot:
         user_id = query.from_user.id
         logger.info(f"📢 Открытие меню автопостинга пользователем {user_id}")
         
-        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
-            [
-                InlineKeyboardButton("➕ ДОБАВИТЬ", callback_data="add_post"),
-                InlineKeyboardButton("🗑 УДАЛИТЬ", callback_data="admin_post_remove")
-            ],
-            [
-                InlineKeyboardButton("📋 СПИСОК", callback_data="admin_post_list"),
-                InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")
-            ]
+            [InlineKeyboardButton("➕ ДОБАВИТЬ КАНАЛ", callback_data="add_post")],
+            [InlineKeyboardButton("🗑 УДАЛИТЬ КАНАЛ", callback_data="admin_post_remove")],
+            [InlineKeyboardButton("📋 СПИСОК КАНАЛОВ", callback_data="admin_post_list")],
+            [InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_panel")]
         ]
         
         text = "<b>📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ</b>\n\nВыберите действие:"
@@ -1432,7 +1408,7 @@ class GardenHorizonsBot:
         if query.data == "add_op":
             if not settings.is_admin:
                 return
-            # Передаем управление ConversationHandler - возвращаем ничего
+            # Передаем управление ConversationHandler - ничего не делаем
             return
         
         # Удаление канала из ОП

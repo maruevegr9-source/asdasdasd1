@@ -1,4 +1,4 @@
-import os
+\import os
 import json
 import logging
 import asyncio
@@ -67,7 +67,9 @@ BOT_LINK = "https://t.me/GardenHorizons_StocksBot"
 CHAT_LINK = "https://t.me/GardenHorizons_Trade"
 
 # Состояния для ConversationHandler
-ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME, ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME, MAILING_TEXT = range(5)
+ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = range(2)
+ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = range(2, 4)
+MAILING_TEXT = 4
 
 # Главное сообщение
 MAIN_MENU_TEXT = (
@@ -694,8 +696,8 @@ class GardenHorizonsBot:
             'Expires': '0'
         })
         
-        self.setup_handlers()
         self.setup_conversation_handlers()
+        self.setup_handlers()
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
         logger.info(f"📢 Каналов ОП: {len(self.required_channels)}")
@@ -704,8 +706,10 @@ class GardenHorizonsBot:
     # ========== НАСТРОЙКА ОБРАБОТЧИКОВ ==========
     
     def setup_conversation_handlers(self):
+        """ВАЖНО: ConversationHandler создаем, но НЕ добавляем здесь"""
+        
         # Диалог добавления канала в ОП
-        add_op_conv = ConversationHandler(
+        self.add_op_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_op_start, pattern="^add_op$")],
             states={
                 ADD_OP_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_op_id)],
@@ -716,7 +720,7 @@ class GardenHorizonsBot:
         )
         
         # Диалог добавления канала для автопостинга
-        add_post_conv = ConversationHandler(
+        self.add_post_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_post_start, pattern="^add_post$")],
             states={
                 ADD_POST_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_post_id)],
@@ -727,7 +731,7 @@ class GardenHorizonsBot:
         )
         
         # Диалог рассылки
-        mailing_conv = ConversationHandler(
+        self.mailing_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.mailing_start, pattern="^mailing$")],
             states={
                 MAILING_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.mailing_get_text)],
@@ -735,12 +739,16 @@ class GardenHorizonsBot:
             fallbacks=[CommandHandler("cancel", self.cancel_mailing)],
             name="mailing_conversation"
         )
-        
-        self.application.add_handler(add_op_conv)
-        self.application.add_handler(add_post_conv)
-        self.application.add_handler(mailing_conv)
     
     def setup_handlers(self):
+        """КЛЮЧЕВОЙ МОМЕНТ: Сначала добавляем ConversationHandler, потом все остальное"""
+        
+        # 1. СНАЧАЛА ConversationHandler (они имеют приоритет)
+        self.application.add_handler(self.add_op_conv)
+        self.application.add_handler(self.add_post_conv)
+        self.application.add_handler(self.mailing_conv)
+        
+        # 2. ПОТОМ команды
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("settings", self.cmd_settings))
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))
@@ -748,7 +756,11 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("notifications_off", self.cmd_notifications_off))
         self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CommandHandler("admin", self.cmd_admin))
+        
+        # 3. ПОТОМ обработчик callback (он будет обрабатывать ТОЛЬКО то, что не поймали ConversationHandler)
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        
+        # 4. ПОТОМ обработчик сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
     
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
@@ -923,19 +935,12 @@ class GardenHorizonsBot:
         
         stats = get_stats()
         
-        # ГОРИЗОНТАЛЬНЫЕ КНОПКИ
         keyboard = [
-            [
-                InlineKeyboardButton("🔐 ОП", callback_data="admin_op"),
-                InlineKeyboardButton("📢 АВТОПОСТИНГ", callback_data="admin_post")
-            ],
-            [
-                InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing"),
-                InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")
-            ],
-            [
-                InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")
-            ]
+            [InlineKeyboardButton("🔐 УПРАВЛЕНИЕ ОП", callback_data="admin_op")],
+            [InlineKeyboardButton("📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ", callback_data="admin_post")],
+            [InlineKeyboardButton("📧 РАССЫЛКА", callback_data="mailing")],
+            [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")],
+            [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
         
         text = (
@@ -955,17 +960,11 @@ class GardenHorizonsBot:
         stats = get_stats()
         
         keyboard = [
-            [
-                InlineKeyboardButton("🔐 ОП", callback_data="admin_op"),
-                InlineKeyboardButton("📢 АВТОПОСТИНГ", callback_data="admin_post")
-            ],
-            [
-                InlineKeyboardButton("📧 РАССЫЛКА", callback_data="admin_mailing"),
-                InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")
-            ],
-            [
-                InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")
-            ]
+            [InlineKeyboardButton("🔐 УПРАВЛЕНИЕ ОП", callback_data="admin_op")],
+            [InlineKeyboardButton("📢 УПРАВЛЕНИЕ АВТОПОСТИНГОМ", callback_data="admin_post")],
+            [InlineKeyboardButton("📧 РАССЫЛКА", callback_data="mailing")],
+            [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="admin_stats")],
+            [InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
         
         text = (
@@ -978,7 +977,7 @@ class GardenHorizonsBot:
         
         await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== УПРАВЛЕНИЕ ОП (ОБЯЗАТЕЛЬНАЯ ПОДПИСКА) ==========
+    # ========== МЕНЮ НАСТРОЙКИ ОП ==========
     
     async def show_op_menu(self, query):
         user_id = query.from_user.id
@@ -997,6 +996,7 @@ class GardenHorizonsBot:
     
     # Добавление канала в ОП
     async def add_op_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Этот метод вызывается ConversationHandler"""
         query = update.callback_query
         user_id = query.from_user.id
         logger.info(f"➕ Начало добавления канала ОП пользователем {user_id}")
@@ -1109,7 +1109,7 @@ class GardenHorizonsBot:
         
         await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== УПРАВЛЕНИЕ АВТОПОСТИНГОМ ==========
+    # ========== МЕНЮ АВТОПОСТИНГА ==========
     
     async def show_post_menu(self, query):
         user_id = query.from_user.id
@@ -1128,6 +1128,7 @@ class GardenHorizonsBot:
     
     # Добавление канала для автопостинга
     async def add_post_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Этот метод вызывается ConversationHandler"""
         query = update.callback_query
         user_id = query.from_user.id
         logger.info(f"➕ Начало добавления канала автопостинга пользователем {user_id}")
@@ -1242,6 +1243,7 @@ class GardenHorizonsBot:
     # ========== РАССЫЛКА ==========
     
     async def mailing_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Этот метод вызывается ConversationHandler"""
         query = update.callback_query
         user_id = query.from_user.id
         logger.info(f"📧 Начало рассылки пользователем {user_id}")
@@ -1360,9 +1362,10 @@ class GardenHorizonsBot:
             await update.message.reply_text("🔄 Возвращаюсь в главное меню...", reply_markup=reply_markup)
             await self.show_main_menu(update)
     
-    # ========== ОБРАБОТКА ВСЕХ CALLBACK ==========
+    # ========== ИСПРАВЛЕННЫЙ ОБРАБОТЧИК CALLBACK ==========
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """ИСПРАВЛЕННЫЙ метод - обрабатывает только то, что не поймали ConversationHandler"""
         query = update.callback_query
         user = update.effective_user
         await query.answer()
@@ -1370,6 +1373,12 @@ class GardenHorizonsBot:
         logger.info(f"📨 Callback от пользователя {user.id}: {query.data}")
         
         settings = self.user_manager.get_user(user.id)
+        
+        # ВАЖНО: Проверяем, не предназначен ли callback для ConversationHandler
+        # Если да - просто выходим, ConversationHandler сам обработает
+        if query.data in ["add_op", "add_post", "mailing"]:
+            logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
+            return  # Просто выходим, ConversationHandler сам обработает
         
         # Проверка подписки
         if query.data == "check_subscription":
@@ -1416,13 +1425,6 @@ class GardenHorizonsBot:
             await self.show_op_menu(query)
             return
         
-        # Добавление канала в ОП - ConversationHandler
-        if query.data == "add_op":
-            if not settings.is_admin:
-                return
-            # Передаем управление ConversationHandler
-            return
-        
         # Удаление канала из ОП
         if query.data == "op_remove":
             if not settings.is_admin:
@@ -1451,13 +1453,6 @@ class GardenHorizonsBot:
             await self.show_post_menu(query)
             return
         
-        # Добавление канала в автопостинг - ConversationHandler
-        if query.data == "add_post":
-            if not settings.is_admin:
-                return
-            # Передаем управление ConversationHandler
-            return
-        
         # Удаление канала из автопостинга
         if query.data == "post_remove":
             if not settings.is_admin:
@@ -1484,13 +1479,6 @@ class GardenHorizonsBot:
             if not settings.is_admin:
                 return
             await self.show_stats(query)
-            return
-        
-        # Рассылка - ConversationHandler
-        if query.data == "admin_mailing":
-            if not settings.is_admin:
-                return
-            # Передаем управление ConversationHandler
             return
         
         # Подтверждение рассылки

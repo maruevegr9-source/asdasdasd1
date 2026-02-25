@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 import asyncio
 import random
@@ -788,33 +787,57 @@ class GardenHorizonsBot:
     # ========== ПРОВЕРКА ПОДПИСКИ ==========
     
     async def check_subscription(self, user_id: int) -> bool:
+        """
+        Проверяет, подписан ли пользователь на все обязательные каналы
+        Допустимые статусы: MEMBER, ADMINISTRATOR, OWNER, RESTRICTED
+        """
         if not self.required_channels:
             return True
         
         for channel in self.required_channels:
             try:
+                # Преобразуем ID в число для API Telegram
                 channel_id = int(channel['id']) if channel['id'].lstrip('-').isdigit() else channel['id']
-                member = await self.application.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-                valid_statuses = [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR, ChatMember.RESTRICTED]
-                if member.status not in valid_statuses:
-                    logger.info(f"❌ Пользователь {user_id} не подписан на {channel['name']}")
+                
+                # Получаем информацию о пользователе в канале
+                member = await self.application.bot.get_chat_member(
+                    chat_id=channel_id, 
+                    user_id=user_id
+                )
+                
+                # Проверяем статус
+                if member.status not in [
+                    ChatMember.MEMBER, 
+                    ChatMember.ADMINISTRATOR, 
+                    ChatMember.OWNER, 
+                    ChatMember.RESTRICTED
+                ]:
+                    logger.info(f"Пользователь {user_id} не подписан на {channel['name']} (статус: {member.status})")
                     return False
+                    
             except Exception as e:
-                logger.error(f"❌ Ошибка проверки канала {channel['id']}: {e}")
+                logger.error(f"Ошибка проверки канала {channel['id']}: {e}")
                 return False
         
         return True
     
     async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """
+        Проверяет подписку и показывает сообщение с кнопками, если пользователь не подписан
+        Возвращает True, если пользователь подписан или админ
+        """
         user = update.effective_user
         settings = self.user_manager.get_user(user.id)
         
+        # Админ всегда имеет доступ
         if settings.is_admin:
             return True
         
+        # Проверяем подписку
         is_subscribed = await self.check_subscription(user.id)
         
         if not is_subscribed:
+            # Формируем текст с каналами
             channels_text = ""
             for ch in self.required_channels:
                 channels_text += f"▪️ <b>{ch['name']}</b>\n"
@@ -827,21 +850,31 @@ class GardenHorizonsBot:
                 "<b>После подписки нажми кнопку ниже 👇</b>"
             )
             
+            # Создаем клавиатуру с кнопками каналов и кнопкой проверки
             keyboard = []
             for ch in self.required_channels:
                 keyboard.append([InlineKeyboardButton(f"📢 {ch['name']}", url=ch['link'])])
             keyboard.append([InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data="check_subscription")])
+            
             reply_markup = InlineKeyboardMarkup(keyboard)
             
+            # Отправляем сообщение в зависимости от типа update
             if update.message:
-                await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=reply_markup)
+                await update.message.reply_photo(
+                    photo=IMAGE_MAIN, 
+                    caption=text, 
+                    parse_mode='HTML', 
+                    reply_markup=reply_markup
+                )
             elif update.callback_query:
                 await update.callback_query.edit_message_media(
                     media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
                     reply_markup=reply_markup
                 )
+            
             return False
         
+        # Пользователь подписан - добавляем в БД
         add_user_to_db(user.id, user.username or user.first_name)
         return True
     
@@ -1545,7 +1578,7 @@ class GardenHorizonsBot:
             await update.message.reply_text("🔄 <b>Возвращаюсь в главное меню...</b>", reply_markup=reply_markup, parse_mode='HTML')
             await self.show_main_menu(update)
     
-    # ========== ОБРАБОТЧИК CALLBACK ==========
+    # ========== ГЛАВНЫЙ ОБРАБОТЧИК CALLBACK ==========
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Главный обработчик callback запросов"""
@@ -1562,40 +1595,26 @@ class GardenHorizonsBot:
             logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
             return
         
-        # Проверка подписки
+        # Обработка проверки подписки
         if query.data == "check_subscription":
             logger.info(f"✅ Проверка подписки пользователя {user.id}")
             is_subscribed = await self.check_subscription(user.id)
+            
             if is_subscribed:
+                # Пользователь подписан - добавляем в БД и показываем меню
                 add_user_to_db(user.id, user.username or user.first_name)
-                reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
-                await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", reply_markup=reply_markup, parse_mode='HTML')
-                await self.show_main_menu_callback(query)
+                await query.message.delete()
+                await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                await self.show_main_menu(query.message)
             else:
-                channels_text = ""
-                for ch in self.required_channels:
-                    channels_text += f"▪️ <b>{ch['name']}</b>\n"
-                
-                text = (
-                    f"❌ <b>Вы еще не подписались на все каналы!</b>\n\n"
-                    f"Необходимо подписаться на:\n\n{channels_text}\n"
-                    f"<b>После подписки нажмите кнопку еще раз.</b>"
-                )
-                
-                keyboard = []
-                for ch in self.required_channels:
-                    keyboard.append([InlineKeyboardButton(f"📢 {ch['name']}", url=ch['link'])])
-                keyboard.append([InlineKeyboardButton("✅ ПРОВЕРИТЬ СНОВА", callback_data="check_subscription")])
-                await query.edit_message_media(
-                    media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                # Пользователь не подписан - показываем alert
+                await query.answer("❌ Вы еще не подписались на все каналы!", show_alert=True)
             return
         
         # Админ-панель
         if query.data == "admin_panel":
             if not settings.is_admin:
-                await query.edit_message_caption(caption="❌ <b>У вас нет прав!</b>", parse_mode='HTML')
+                await query.answer("❌ У вас нет прав!", show_alert=True)
                 return
             await self.show_admin_panel_callback(query)
             return
@@ -1783,7 +1802,7 @@ class GardenHorizonsBot:
             if gear:
                 parts.append("<b>⚙️ СНАРЯЖЕНИЕ:</b>\n" + "\n".join(gear))
         
-        # ИСПРАВЛЕНИЕ: Проверяем, активна ли погода
+        # Проверяем, активна ли погода
         if "weather" in data and data["weather"].get("active"):
             wtype = data["weather"]["type"]
             ends_at = data["weather"].get("endsAt", "")
@@ -1859,7 +1878,7 @@ class GardenHorizonsBot:
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
         
-        # ИСПРАВЛЕНИЕ: Добавляем погоду ТОЛЬКО если она активна
+        # Добавляем погоду ТОЛЬКО если она активна
         if "weather" in data and data["weather"].get("active"):
             wtype = data["weather"].get("type")
             ends_at = data["weather"].get("endsAt", "")

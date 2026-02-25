@@ -747,9 +747,20 @@ class GardenHorizonsBot:
     
     def reload_channels(self):
         """Перезагружает каналы из БД"""
+        old_op_count = len(self.required_channels)
+        old_post_count = len(self.posting_channels)
+        
         self.required_channels = get_required_channels()
         self.posting_channels = get_posting_channels()
-        logger.info(f"🔄 Каналы перезагружены. ОП: {len(self.required_channels)}, Автопостинг: {len(self.posting_channels)}")
+        
+        logger.info(f"🔄 Каналы перезагружены. ОП: {old_op_count} -> {len(self.required_channels)}, Автопостинг: {old_post_count} -> {len(self.posting_channels)}")
+        
+        # Выводим список каналов для отладки
+        if self.required_channels:
+            logger.info(f"📋 Список каналов ОП:")
+            for ch in self.required_channels:
+                logger.info(f"  - {ch['name']} ({ch['id']})")
+        
         return self.required_channels
     
     def setup_conversation_handlers(self):
@@ -866,6 +877,7 @@ class GardenHorizonsBot:
                         return False
                 
                 try:
+                    # Пытаемся получить информацию о пользователе в канале
                     member = await self.application.bot.get_chat_member(
                         chat_id=chat_id, 
                         user_id=user_id
@@ -884,6 +896,7 @@ class GardenHorizonsBot:
                         
                 except Exception as e:
                     logger.error(f"  ❌ Ошибка получения информации о подписке: {e}")
+                    # Если ошибка, считаем что пользователь не подписан
                     return False
                     
             except Exception as e:
@@ -911,6 +924,10 @@ class GardenHorizonsBot:
         if not is_subscribed:
             # ВАЖНО: Перезагружаем каналы для отображения актуального списка
             channels = self.reload_channels()
+            
+            if not channels:
+                logger.info(f"Нет каналов ОП, пропускаем проверку")
+                return True
             
             channels_text = ""
             for ch in channels:
@@ -1099,6 +1116,9 @@ class GardenHorizonsBot:
     
     async def show_op_menu(self, query):
         """Меню управления ОП"""
+        # Перезагружаем каналы перед показом меню
+        self.reload_channels()
+        
         text = (
             "🔐 <b>УПРАВЛЕНИЕ ОБЯЗАТЕЛЬНОЙ ПОДПИСКОЙ (ОП)</b>\n\n"
             "<b>Каналы, на которые нужно подписаться для доступа к боту</b>\n\n"
@@ -1154,6 +1174,7 @@ class GardenHorizonsBot:
             else:
                 chat = await self.application.bot.get_chat(int(channel_id))
             
+            # Проверяем, является ли бот администратором канала
             bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 logger.error(f"❌ Бот не является администратором канала {channel_id}")
@@ -1187,6 +1208,9 @@ class GardenHorizonsBot:
     
     async def show_op_remove(self, query):
         """Показ списка каналов для удаления из ОП"""
+        # Перезагружаем каналы перед показом
+        self.reload_channels()
+        
         if not self.required_channels:
             await query.message.reply_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
             return
@@ -1207,12 +1231,14 @@ class GardenHorizonsBot:
         # ВАЖНО: Перезагружаем каналы сразу после удаления
         self.reload_channels()
         
-        # ИСПРАВЛЕНИЕ: Только одно сообщение об удалении
         await query.answer("✅ Канал удален из ОП!")
         await query.message.reply_text("✅ <b>Канал удален из ОП!</b>", parse_mode='HTML')
     
     async def show_op_list(self, query):
         """Показ списка каналов ОП"""
+        # Перезагружаем каналы перед показом
+        self.reload_channels()
+        
         if not self.required_channels:
             text = "📭 <b>Нет каналов в обязательной подписке</b>"
         else:
@@ -1227,6 +1253,9 @@ class GardenHorizonsBot:
     
     async def show_post_menu(self, query):
         """Меню управления автопостингом"""
+        # Перезагружаем каналы перед показом
+        self.reload_channels()
+        
         text = (
             "📢 <b>УПРАВЛЕНИЕ АВТОПОСТИНГОМ</b>\n\n"
             "<b>Каналы, в которые бот будет отправлять уведомления</b>\n"
@@ -1283,16 +1312,9 @@ class GardenHorizonsBot:
             else:
                 chat = await self.application.bot.get_chat(int(channel_id))
             
-            bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
-            if bot_member.status not in ['administrator', 'creator']:
-                logger.error(f"❌ Бот не является администратором канала {channel_id}")
-                await update.message.reply_text(
-                    "❌ <b>Бот не является администратором этого канала!</b>\n"
-                    "Сделайте бота админом и попробуйте снова.",
-                    parse_mode='HTML'
-                )
-                await self.show_admin_panel(update)
-                return ConversationHandler.END
+            # Для автопостинга не нужно проверять, является ли бот администратором
+            # Достаточно просто получить информацию о канале
+            logger.info(f"✅ Канал найден: {chat.title} (ID: {chat.id})")
             
             add_posting_channel(str(chat.id), channel_name, chat.username)
             
@@ -1315,6 +1337,9 @@ class GardenHorizonsBot:
     
     async def show_post_remove(self, query):
         """Показ списка каналов для удаления из автопостинга"""
+        # Перезагружаем каналы перед показом
+        self.reload_channels()
+        
         if not self.posting_channels:
             await query.message.reply_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
             await self.show_post_menu(query)
@@ -1342,6 +1367,9 @@ class GardenHorizonsBot:
     
     async def show_post_list(self, query):
         """Показ списка каналов автопостинга"""
+        # Перезагружаем каналы перед показом
+        self.reload_channels()
+        
         if not self.posting_channels:
             text = "📭 <b>Нет каналов для автопостинга</b>"
         else:

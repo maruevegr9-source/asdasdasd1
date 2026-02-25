@@ -3,6 +3,7 @@ import logging
 import asyncio
 import random
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass, field
@@ -107,19 +108,30 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 
 def is_weather_active(weather_data: Dict) -> bool:
     """Проверяет, активна ли погода с учетом времени окончания"""
-    if not weather_data or not weather_data.get("active"):
+    if not weather_data:
+        logger.debug("🌤️ Нет данных о погоде")
         return False
     
-    ends_at = weather_data.get("endsAt", "")
-    if not ends_at:
-        return True
+    # Проверяем флаг active
+    if not weather_data.get("active"):
+        logger.debug("🌤️ Погода не активна по флагу active")
+        return False
     
-    try:
-        ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
-        now = datetime.now(ends_time.tzinfo)
-        return now < ends_time
-    except:
-        return True
+    # Проверяем timestamp окончания
+    end_timestamp = weather_data.get("endTimestamp")
+    if end_timestamp:
+        current_time = int(time.time())
+        if current_time >= end_timestamp:
+            logger.info(f"🌤️ Погода закончилась по таймеру: current={current_time}, end={end_timestamp}")
+            return False
+        else:
+            time_left = end_timestamp - current_time
+            logger.debug(f"🌤️ Погода активна, осталось {time_left} сек")
+            return True
+    
+    # Если нет timestamp, считаем по флагу
+    logger.debug(f"🌤️ Погода активна (нет timestamp)")
+    return True
 
 # ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 
@@ -346,6 +358,8 @@ def get_required_channels() -> List[Dict]:
         ]
         conn.close()
         logger.info(f"📥 Загружено {len(channels)} каналов ОП из БД")
+        for ch in channels:
+            logger.info(f"  - {ch['name']} ({ch['id']})")
         return channels
     except Exception as e:
         logger.error(f"❌ Ошибка получения каналов ОП: {e}")
@@ -1767,7 +1781,8 @@ class GardenHorizonsBot:
                 except:
                     pass
                 
-                await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                # ИСПРАВЛЕНО: используем правильный метод для ответа
+                await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 await self.show_main_menu(query.message)
             else:
                 logger.info(f"❌ Пользователь {user.id} не подписался на все каналы")
@@ -1970,19 +1985,19 @@ class GardenHorizonsBot:
             weather_data = data["weather"]
             if is_weather_active(weather_data):
                 wtype = weather_data["type"]
-                ends_at = weather_data.get("endsAt", "")
+                end_timestamp = weather_data.get("endTimestamp")
                 
-                if ends_at and wtype in TRANSLATIONS:
+                if end_timestamp and wtype in TRANSLATIONS:
                     try:
-                        ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
-                        time_str = ends_time.strftime("%H:%M:%S")
+                        end_time = datetime.fromtimestamp(end_timestamp)
+                        time_str = end_time.strftime("%H:%M:%S")
                         parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {time_str}")
                     except:
                         parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
                 elif wtype in TRANSLATIONS:
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
             else:
-                logger.info(f"🌤️ Погода не активна, не добавляем в сообщение")
+                logger.debug(f"🌤️ Погода не активна, не добавляем в сообщение")
         
         return "\n\n".join(parts) if parts else None
     
@@ -2021,13 +2036,13 @@ class GardenHorizonsBot:
         
         return message
     
-    def format_weather_started_message(self, weather_type: str, ends_at: str = "") -> str:
+    def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
         """Формирует сообщение о начале погоды"""
         translated = translate(weather_type)
-        if ends_at:
+        if end_timestamp:
             try:
-                ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
-                time_str = ends_time.strftime("%H:%M:%S")
+                end_time = datetime.fromtimestamp(end_timestamp)
+                time_str = end_time.strftime("%H:%M:%S")
                 return f"<b>🌤️ Началась погода {translated}! Активна до {time_str}</b>"
             except:
                 return f"<b>🌤️ Началась погода {translated}!</b>"
@@ -2081,11 +2096,12 @@ class GardenHorizonsBot:
         
         old_type = old_weather.get("type") if old_active else None
         new_type = new_weather.get("type") if new_active else None
+        new_end = new_weather.get("endTimestamp") if new_active else None
         
         # Погода началась
         if not old_active and new_active:
             logger.info(f"🌤️ Погода началась: {new_type}")
-            return 'started', new_type, new_weather.get("endsAt", "")
+            return 'started', new_type, new_end
         
         # Погода закончилась
         if old_active and not new_active:
@@ -2133,22 +2149,24 @@ class GardenHorizonsBot:
                     weather_changed = False
                     stock_changed = False
                     weather_info = None
+                    weather_type = None
                     
                     # Проверяем изменения в погоде
-                    weather_status, weather_type, ends_at = self.get_weather_change(self.last_data, new_data)
+                    weather_status, wtype, end_timestamp = self.get_weather_change(self.last_data, new_data)
                     
-                    if weather_status and weather_type:
+                    if weather_status and wtype:
                         update_id = f"weather_{weather_status}_{datetime.now().isoformat()}"
                         
-                        if not was_weather_notification_sent(weather_type, weather_status, update_id):
+                        if not was_weather_notification_sent(wtype, weather_status, update_id):
                             weather_changed = True
+                            weather_type = wtype
                             if weather_status == 'started':
-                                weather_info = self.format_weather_started_message(weather_type, ends_at)
+                                weather_info = self.format_weather_started_message(wtype, end_timestamp)
                             else:
-                                weather_info = self.format_weather_ended_message(weather_type)
+                                weather_info = self.format_weather_ended_message(wtype)
                             
-                            logger.info(f"🌤️ Изменение погоды: {weather_status} {weather_type}")
-                            mark_weather_notification_sent(weather_type, weather_status, update_id)
+                            logger.info(f"🌤️ Изменение погоды: {weather_status} {wtype}")
+                            mark_weather_notification_sent(wtype, weather_status, update_id)
                     
                     # Проверяем изменения в стоке
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
@@ -2160,7 +2178,7 @@ class GardenHorizonsBot:
                         all_items = self.get_all_current_items(new_data)
                         
                         if all_items or weather_info:
-                            logger.info(f"✅ Отправка обновлений: сток={bool(all_items)}, погода={weather_info}")
+                            logger.info(f"✅ Отправка обновлений: сток={bool(all_items)}, погода={weather_info is not None}")
                             
                             update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
@@ -2201,7 +2219,7 @@ class GardenHorizonsBot:
                                     message_parts = []
                                     
                                     # Добавляем информацию о погоде если есть
-                                    if weather_info and settings.weather.get(weather_type, ItemSettings()).enabled:
+                                    if weather_info and weather_type and settings.weather.get(weather_type, ItemSettings()).enabled:
                                         message_parts.append(weather_info)
                                     
                                     # Добавляем предметы если есть

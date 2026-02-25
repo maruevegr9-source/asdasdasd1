@@ -6,12 +6,10 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass, field
-from collections import defaultdict
-from enum import Enum
 
 import requests
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto, ChatMember
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, InputMediaPhoto, ChatMember
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut
@@ -30,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
+# ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
@@ -69,7 +67,7 @@ ADD_OP_CHANNEL_ID, ADD_OP_CHANNEL_NAME = range(2)
 ADD_POST_CHANNEL_ID, ADD_POST_CHANNEL_NAME = range(2, 4)
 MAILING_TEXT = 4
 
-# ЖИРНЫЙ ТЕКСТ ГЛАВНОГО МЕНЮ
+# Текст главного меню
 MAIN_MENU_TEXT = (
     "🌱 <b>Привет! Я могу отслеживать стоки в игре Garden Horizons, "
     "и отправлять их тебе, круто да? 🔥</b>\n\n"
@@ -78,7 +76,7 @@ MAIN_MENU_TEXT = (
     "<b>👇 Выберите действие ниже 👇</b>"
 )
 
-# 🌱 ПОЛНЫЙ СЛОВАРЬ ПЕРЕВОДОВ
+# ========== СЛОВАРЬ ПЕРЕВОДОВ ==========
 TRANSLATIONS = {
     "Carrot": "🥕 Морковь", "Corn": "🌽 Кукуруза", "Onion": "🧅 Лук",
     "Strawberry": "🍓 Клубника", "Mushroom": "🍄 Гриб", "Beetroot": "🍠 Свекла",
@@ -110,28 +108,17 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 def is_weather_active(weather_data: Dict) -> bool:
     """Проверяет, активна ли погода с учетом времени окончания"""
     if not weather_data or not weather_data.get("active"):
-        logger.info(f"🌤️ Погода не активна по флагу active")
         return False
     
     ends_at = weather_data.get("endsAt", "")
     if not ends_at:
-        logger.info(f"🌤️ Погода активна (нет времени окончания)")
         return True
     
     try:
         ends_time = datetime.fromisoformat(ends_at.replace('Z', '+00:00'))
         now = datetime.now(ends_time.tzinfo)
-        is_active = now < ends_time
-        if is_active:
-            time_left = (ends_time - now).total_seconds()
-            hours = int(time_left // 3600)
-            minutes = int((time_left % 3600) // 60)
-            logger.info(f"🌤️ Погода активна, осталось {hours}ч {minutes}м")
-        else:
-            logger.info(f"🌤️ Погода закончилась в {ends_time}")
-        return is_active
-    except Exception as e:
-        logger.error(f"❌ Ошибка парсинга времени погоды: {e}")
+        return now < ends_time
+    except:
         return True
 
 # ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
@@ -207,7 +194,7 @@ def init_database():
             )
         """)
         
-        # Таблица для отслеживания отправленных уведомлений о погоде
+        # Таблица для отслеживания уведомлений о погоде
         cur.execute("""
             CREATE TABLE IF NOT EXISTS weather_notifications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -862,7 +849,7 @@ class GardenHorizonsBot:
         await self.show_admin_panel(update)
         return ConversationHandler.END
     
-    # ========== ОСНОВНАЯ ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ==========
+    # ========== ПРОВЕРКА ПОДПИСКИ ==========
     
     async def check_subscription(self, user_id: int) -> bool:
         """
@@ -1250,7 +1237,7 @@ class GardenHorizonsBot:
         self.reload_channels()
         
         await query.answer("✅ Канал удален из ОП!")
-        await query.message.reply_text("✅ <b>Канал удален из ОП!</b>", parse_mode='HTML')
+        await self.show_op_remove(query)
     
     async def show_op_list(self, query):
         """Показ списка каналов ОП"""
@@ -1330,7 +1317,7 @@ class GardenHorizonsBot:
             else:
                 chat = await self.application.bot.get_chat(int(channel_id))
             
-            # ВОЗВРАЩАЕМ проверку на администратора для автопостинга
+            # Проверяем, является ли бот администратором канала
             bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 logger.error(f"❌ Бот не является администратором канала {channel_id}")
@@ -1421,6 +1408,10 @@ class GardenHorizonsBot:
             await query.message.reply_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
             return ConversationHandler.END
         
+        # Очищаем старые данные
+        if 'mailing_text' in context.user_data:
+            del context.user_data['mailing_text']
+        
         await query.message.reply_text(
             "📧 <b>Рассылка</b>\n\nВведите текст для рассылки:",
             parse_mode='HTML'
@@ -1494,6 +1485,10 @@ class GardenHorizonsBot:
             f"👥 <b>Всего:</b> {len(users)}",
             parse_mode='HTML'
         )
+        
+        # Очищаем данные после рассылки
+        if 'mailing_text' in context.user_data:
+            del context.user_data['mailing_text']
         
         await self.show_admin_panel_callback(query)
     
@@ -1730,6 +1725,7 @@ class GardenHorizonsBot:
         user = update.effective_user
         text = update.message.text
         
+        # Проверяем, не находимся ли мы в диалоге
         if context.user_data.get(ADD_OP_CHANNEL_ID) or context.user_data.get(ADD_POST_CHANNEL_ID) or context.user_data.get(MAILING_TEXT):
             return
         
@@ -1751,10 +1747,12 @@ class GardenHorizonsBot:
         
         settings = self.user_manager.get_user(user.id)
         
+        # Пропускаем callback для ConversationHandler
         if query.data in ["add_op", "add_post", "mailing"]:
             logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
             return
         
+        # Обработка проверки подписки
         if query.data == "check_subscription":
             logger.info(f"✅ Нажата кнопка 'Я ПОДПИСАЛСЯ' пользователем {user.id}")
             
@@ -1776,6 +1774,7 @@ class GardenHorizonsBot:
                 await query.answer("❌ Вы еще не подписались на все каналы!", show_alert=True)
             return
         
+        # Админ-панель
         if query.data == "admin_panel":
             if not settings.is_admin:
                 await query.answer("❌ У вас нет прав!", show_alert=True)
@@ -1783,81 +1782,96 @@ class GardenHorizonsBot:
             await self.show_admin_panel_callback(query)
             return
         
+        # Меню ОП
         if query.data == "admin_op":
             if not settings.is_admin:
                 return
             await self.show_op_menu(query)
             return
         
+        # Удаление из ОП
         if query.data == "op_remove":
             if not settings.is_admin:
                 return
             await self.show_op_remove(query)
             return
         
+        # Список ОП
         if query.data == "op_list":
             if not settings.is_admin:
                 return
             await self.show_op_list(query)
             return
         
+        # Удаление конкретного канала из ОП
         if query.data.startswith("op_del_"):
             if not settings.is_admin:
                 return
             await self.delete_op_channel(query)
             return
         
+        # Меню автопостинга
         if query.data == "admin_post":
             if not settings.is_admin:
                 return
             await self.show_post_menu(query)
             return
         
+        # Удаление из автопостинга
         if query.data == "post_remove":
             if not settings.is_admin:
                 return
             await self.show_post_remove(query)
             return
         
+        # Список автопостинга
         if query.data == "post_list":
             if not settings.is_admin:
                 return
             await self.show_post_list(query)
             return
         
+        # Удаление конкретного канала из автопостинга
         if query.data.startswith("post_del_"):
             if not settings.is_admin:
                 return
             await self.delete_post_channel(query)
             return
         
+        # Статистика
         if query.data == "admin_stats":
             if not settings.is_admin:
                 return
             await self.show_stats(query)
             return
         
+        # Подтверждение рассылки
         if query.data in ["mailing_yes", "mailing_no"]:
             if not settings.is_admin:
                 return
             await self.mailing_confirm(update, context)
             return
         
+        # Проверка подписки для остальных действий
         if not await self.require_subscription(update, context):
             return
         
+        # Главное меню
         if query.data == "menu_main":
             await self.show_main_menu_callback(query)
             return
         
+        # Меню настроек
         if query.data == "menu_settings":
             await self.show_main_settings_callback(query, settings)
             return
         
+        # Сток
         if query.data == "menu_stock":
             await self.show_stock_callback(query)
             return
         
+        # Уведомления
         if query.data == "notifications_on":
             settings.notifications_enabled = True
             update_user_setting(user.id, 'notifications_enabled', True)
@@ -1870,6 +1884,7 @@ class GardenHorizonsBot:
             await query.message.reply_html("<b>❌ Уведомления выключены</b>")
             return
         
+        # Настройки категорий
         if query.data == "settings_seeds":
             await self.show_seeds_settings(query, settings)
             return
@@ -1950,7 +1965,7 @@ class GardenHorizonsBot:
             if gear:
                 parts.append("<b>⚙️ СНАРЯЖЕНИЕ:</b>\n" + "\n".join(gear))
         
-        # ИСПРАВЛЕНИЕ: Проверяем, активна ли погода с учетом времени окончания
+        # Проверяем, активна ли погода с учетом времени окончания
         if "weather" in data:
             weather_data = data["weather"]
             if is_weather_active(weather_data):
@@ -2006,11 +2021,6 @@ class GardenHorizonsBot:
         
         return message
     
-    def format_weather_ended_message(self, weather_type: str) -> str:
-        """Формирует сообщение о конце погоды"""
-        translated = translate(weather_type)
-        return f"<b>🌤️ Погода {translated} закончилась!</b>"
-    
     def format_weather_started_message(self, weather_type: str, ends_at: str = "") -> str:
         """Формирует сообщение о начале погоды"""
         translated = translate(weather_type)
@@ -2022,6 +2032,11 @@ class GardenHorizonsBot:
             except:
                 return f"<b>🌤️ Началась погода {translated}!</b>"
         return f"<b>🌤️ Началась погода {translated}!</b>"
+    
+    def format_weather_ended_message(self, weather_type: str) -> str:
+        """Формирует сообщение о конце погоды"""
+        translated = translate(weather_type)
+        return f"<b>🌤️ Погода {translated} закончилась!</b>"
     
     def get_all_current_items(self, data: Dict) -> Dict[str, int]:
         all_items = {}
@@ -2038,7 +2053,7 @@ class GardenHorizonsBot:
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
         
-        # ИСПРАВЛЕНИЕ: Добавляем погоду ТОЛЬКО если она активна
+        # Добавляем погоду ТОЛЬКО если она активна
         if "weather" in data:
             weather_data = data["weather"]
             if is_weather_active(weather_data):
@@ -2153,6 +2168,7 @@ class GardenHorizonsBot:
                             
                             update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
+                            # 1. Отправляем в ОСНОВНОЙ канал
                             main_channel_items = {}
                             for name, qty in all_items.items():
                                 if is_allowed_for_main_channel(name):
@@ -2166,6 +2182,7 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(MAIN_CHANNEL_ID), name, qty)
                                         logger.info(f"📢 В основной канал: {name} = {qty}")
                             
+                            # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
                             for channel in self.posting_channels:
                                 for name, qty in main_channel_items.items():
                                     if not was_item_sent(int(channel['id']), name, qty):
@@ -2174,6 +2191,7 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(channel['id']), name, qty)
                                         logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
                             
+                            # 3. Отправляем пользователям (личные сообщения)
                             users = get_all_users()
                             
                             for user_id in users:

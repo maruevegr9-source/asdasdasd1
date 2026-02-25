@@ -20,7 +20,70 @@ from telegram.error import RetryAfter, TimedOut
 # Загружаем переменные окружения
 load_dotenv()
 
-# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ С АНАЛИЗОМ ==========
+class DetailedLogger:
+    """Класс для детального логирования всех действий"""
+    
+    def __init__(self):
+        self.action_counter = 0
+        self.error_counter = 0
+        self.start_time = datetime.now()
+    
+    def log_action(self, action: str, user_id: int = None, details: str = None):
+        """Логирует действие пользователя"""
+        self.action_counter += 1
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        log_msg = f"[{timestamp}] 🔹 ДЕЙСТВИЕ #{self.action_counter}"
+        if user_id:
+            log_msg += f" | Пользователь: {user_id}"
+        log_msg += f" | {action}"
+        if details:
+            log_msg += f" | {details}"
+        
+        logger.info(log_msg)
+        return self.action_counter
+    
+    def log_callback(self, callback_data: str, user_id: int):
+        """Логирует callback запрос"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"[{timestamp}] 🔸 CALLBACK | Пользователь: {user_id} | Данные: {callback_data}")
+    
+    def log_error(self, error: str, user_id: int = None, context: str = None):
+        """Логирует ошибку"""
+        self.error_counter += 1
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        log_msg = f"[{timestamp}] ❌ ОШИБКА #{self.error_counter}"
+        if user_id:
+            log_msg += f" | Пользователь: {user_id}"
+        log_msg += f" | {error}"
+        if context:
+            log_msg += f" | Контекст: {context}"
+        
+        logger.error(log_msg)
+    
+    def log_api_request(self, url: str, status_code: int = None):
+        """Логирует запрос к API"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        status = f" | Статус: {status_code}" if status_code else ""
+        logger.info(f"[{timestamp}] 📡 API ЗАПРОС | URL: {url}{status}")
+    
+    def log_notification(self, user_id: int, items: List[str]):
+        """Логирует отправку уведомления"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"[{timestamp}] 📨 УВЕДОМЛЕНИЕ | Пользователь: {user_id} | Предметы: {items}")
+    
+    def get_stats(self) -> Dict:
+        """Возвращает статистику логов"""
+        uptime = datetime.now() - self.start_time
+        return {
+            'actions': self.action_counter,
+            'errors': self.error_counter,
+            'uptime': str(uptime).split('.')[0]
+        }
+
+# Настройка базового логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -30,6 +93,9 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Создаем экземпляр детального логгера
+detailed_logger = DetailedLogger()
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -45,7 +111,6 @@ if os.environ.get('RAILWAY_ENVIRONMENT'):
     DB_PATH = "/data/bot.db"
     logger.info("✅ Работаем на Railway, БД в /data/bot.db")
     
-    # Проверяем и создаем папку /data
     try:
         os.makedirs('/data', exist_ok=True)
         logger.info(f"📁 Папка /data создана/существует")
@@ -115,7 +180,6 @@ def init_database():
         cur = conn.cursor()
         logger.info(f"✅ Подключение к БД успешно: {DB_PATH}")
         
-        # Таблица пользователей
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -125,7 +189,6 @@ def init_database():
             )
         """)
         
-        # Таблица обязательных каналов (ОП)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS required_channels (
                 channel_id TEXT PRIMARY KEY,
@@ -135,7 +198,6 @@ def init_database():
             )
         """)
         
-        # Таблица каналов для автопостинга
         cur.execute("""
             CREATE TABLE IF NOT EXISTS posting_channels (
                 channel_id TEXT PRIMARY KEY,
@@ -145,7 +207,6 @@ def init_database():
             )
         """)
         
-        # Таблица для истории отправленных уведомлений
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sent_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +218,6 @@ def init_database():
             )
         """)
         
-        # Таблица для настроек пользователей по предметам
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_items (
                 user_id INTEGER,
@@ -167,7 +227,6 @@ def init_database():
             )
         """)
         
-        # Таблица для отслеживания отправленных обновлений пользователям
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_updates (
                 user_id INTEGER,
@@ -177,7 +236,6 @@ def init_database():
             )
         """)
         
-        # Таблица для отслеживания отправленных предметов пользователям
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_sent_items (
                 user_id INTEGER,
@@ -198,40 +256,31 @@ def init_database():
         logger.error(f"❌ Ошибка инициализации БД: {e}")
         return False
 
-# Инициализируем БД
 db_initialized = init_database()
-if not db_initialized and os.environ.get('RAILWAY_ENVIRONMENT'):
-    logger.error("❌ НЕ УДАЛОСЬ ИНИЦИАЛИЗИРОВАТЬ БД! Проверьте Volume на Railway")
 
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ==========
 
 def get_db():
-    """Возвращает соединение с БД"""
     return sqlite3.connect(DB_PATH)
 
 # ----- ПОЛЬЗОВАТЕЛИ -----
 
 def add_user_to_db(user_id: int, username: str = ""):
-    """Добавляет или обновляет пользователя в БД"""
     try:
         conn = get_db()
         cur = conn.cursor()
         
-        # Проверяем, есть ли уже пользователь
         cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         if cur.fetchone():
-            # Обновляем username если изменился
             cur.execute(
                 "UPDATE users SET username = ? WHERE user_id = ?",
                 (username, user_id)
             )
         else:
-            # Добавляем нового пользователя
             cur.execute(
                 "INSERT INTO users (user_id, username, first_seen) VALUES (?, ?, ?)",
                 (user_id, username, datetime.now().isoformat())
             )
-            # Добавляем все предметы в user_items
             for item in SEEDS_LIST + GEAR_LIST + WEATHER_LIST:
                 cur.execute(
                     "INSERT INTO user_items (user_id, item_name, enabled) VALUES (?, ?, 1)",
@@ -240,17 +289,15 @@ def add_user_to_db(user_id: int, username: str = ""):
         
         conn.commit()
         conn.close()
-        logger.info(f"✅ Пользователь {user_id} ({username}) добавлен/обновлен в БД")
+        detailed_logger.log_action("Добавление пользователя в БД", user_id, username)
     except Exception as e:
-        logger.error(f"❌ Ошибка добавления пользователя {user_id}: {e}")
+        detailed_logger.log_error(str(e), user_id, "add_user_to_db")
 
 def get_user_settings(user_id: int) -> Dict:
-    """Получает настройки пользователя из БД"""
     try:
         conn = get_db()
         cur = conn.cursor()
         
-        # Основные настройки
         cur.execute(
             "SELECT notifications_enabled FROM users WHERE user_id = ?",
             (user_id,)
@@ -258,7 +305,6 @@ def get_user_settings(user_id: int) -> Dict:
         result = cur.fetchone()
         notifications_enabled = bool(result[0]) if result else True
         
-        # Настройки предметов
         cur.execute(
             "SELECT item_name, enabled FROM user_items WHERE user_id = ?",
             (user_id,)
@@ -274,7 +320,7 @@ def get_user_settings(user_id: int) -> Dict:
             'weather': {item: items.get(item, True) for item in WEATHER_LIST}
         }
     except Exception as e:
-        logger.error(f"❌ Ошибка получения настроек пользователя {user_id}: {e}")
+        detailed_logger.log_error(str(e), user_id, "get_user_settings")
         return {
             'notifications_enabled': True,
             'seeds': {item: True for item in SEEDS_LIST},
@@ -283,7 +329,6 @@ def get_user_settings(user_id: int) -> Dict:
         }
 
 def update_user_setting(user_id: int, setting: str, value: Any):
-    """Обновляет настройку пользователя"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -302,11 +347,11 @@ def update_user_setting(user_id: int, setting: str, value: Any):
         
         conn.commit()
         conn.close()
+        detailed_logger.log_action("Обновление настроек", user_id, f"{setting}={value}")
     except Exception as e:
-        logger.error(f"❌ Ошибка обновления настройки {setting} для {user_id}: {e}")
+        detailed_logger.log_error(str(e), user_id, "update_user_setting")
 
 def get_all_users() -> List[int]:
-    """Возвращает список всех user_id"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -315,11 +360,10 @@ def get_all_users() -> List[int]:
         conn.close()
         return users
     except Exception as e:
-        logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+        detailed_logger.log_error(str(e), None, "get_all_users")
         return []
 
 def get_users_count() -> int:
-    """Возвращает количество пользователей"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -328,13 +372,12 @@ def get_users_count() -> int:
         conn.close()
         return count
     except Exception as e:
-        logger.error(f"❌ Ошибка получения количества пользователей: {e}")
+        detailed_logger.log_error(str(e), None, "get_users_count")
         return 0
 
 # ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) -----
 
 def get_required_channels() -> List[Dict]:
-    """Возвращает список обязательных каналов"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -346,11 +389,10 @@ def get_required_channels() -> List[Dict]:
         conn.close()
         return channels
     except Exception as e:
-        logger.error(f"❌ Ошибка получения каналов ОП: {e}")
+        detailed_logger.log_error(str(e), None, "get_required_channels")
         return []
 
 def add_required_channel(channel_id: str, name: str, link: str):
-    """Добавляет канал в обязательную подписку"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -360,26 +402,24 @@ def add_required_channel(channel_id: str, name: str, link: str):
         )
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал ОП добавлен: {name} ({channel_id})")
+        detailed_logger.log_action("Добавление канала ОП", None, f"{name} ({channel_id})")
     except Exception as e:
-        logger.error(f"❌ Ошибка добавления канала ОП: {e}")
+        detailed_logger.log_error(str(e), None, "add_required_channel")
 
 def remove_required_channel(channel_id: str):
-    """Удаляет канал из обязательной подписки"""
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM required_channels WHERE channel_id = ?", (channel_id,))
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал ОП удален: {channel_id}")
+        detailed_logger.log_action("Удаление канала ОП", None, channel_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка удаления канала ОП: {e}")
+        detailed_logger.log_error(str(e), None, "remove_required_channel")
 
 # ----- КАНАЛЫ ДЛЯ АВТОПОСТИНГА -----
 
 def get_posting_channels() -> List[Dict]:
-    """Возвращает список каналов для автопостинга"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -391,11 +431,10 @@ def get_posting_channels() -> List[Dict]:
         conn.close()
         return channels
     except Exception as e:
-        logger.error(f"❌ Ошибка получения каналов автопостинга: {e}")
+        detailed_logger.log_error(str(e), None, "get_posting_channels")
         return []
 
 def add_posting_channel(channel_id: str, name: str, username: str = None):
-    """Добавляет канал для автопостинга"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -405,26 +444,24 @@ def add_posting_channel(channel_id: str, name: str, username: str = None):
         )
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал автопостинга добавлен: {name} ({channel_id})")
+        detailed_logger.log_action("Добавление канала автопостинга", None, f"{name} ({channel_id})")
     except Exception as e:
-        logger.error(f"❌ Ошибка добавления канала автопостинга: {e}")
+        detailed_logger.log_error(str(e), None, "add_posting_channel")
 
 def remove_posting_channel(channel_id: str):
-    """Удаляет канал из автопостинга"""
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM posting_channels WHERE channel_id = ?", (channel_id,))
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал автопостинга удален: {channel_id}")
+        detailed_logger.log_action("Удаление канала автопостинга", None, channel_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка удаления канала автопостинга: {e}")
+        detailed_logger.log_error(str(e), None, "remove_posting_channel")
 
 # ----- ОТПРАВЛЕННЫЕ УВЕДОМЛЕНИЯ -----
 
 def was_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_id: str) -> bool:
-    """Проверяет, отправлялся ли этот предмет пользователю в этом обновлении"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -436,11 +473,10 @@ def was_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_id
         conn.close()
         return count > 0
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки отправленного предмета: {e}")
+        detailed_logger.log_error(str(e), user_id, "was_item_sent_to_user")
         return False
 
 def mark_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_id: str):
-    """Отмечает, что предмет отправлен пользователю"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -451,40 +487,9 @@ def mark_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_i
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"❌ Ошибка отметки отправленного предмета: {e}")
-
-def was_update_sent(user_id: int, update_id: str) -> bool:
-    """Проверяет, отправлялось ли уже это обновление пользователю"""
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FROM user_updates WHERE user_id = ? AND update_id = ?",
-            (user_id, update_id)
-        )
-        count = cur.fetchone()[0]
-        conn.close()
-        return count > 0
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки обновления пользователя: {e}")
-        return False
-
-def mark_update_sent(user_id: int, update_id: str):
-    """Отмечает, что обновление отправлено пользователю"""
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO user_updates (user_id, update_id, sent_at) VALUES (?, ?, ?)",
-            (user_id, update_id, datetime.now().isoformat())
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"❌ Ошибка отметки обновления пользователя: {e}")
+        detailed_logger.log_error(str(e), user_id, "mark_item_sent_to_user")
 
 def was_item_sent(chat_id: int, item_name: str, quantity: int) -> bool:
-    """Проверяет, отправлялось ли уже такое уведомление в канал"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -496,11 +501,10 @@ def was_item_sent(chat_id: int, item_name: str, quantity: int) -> bool:
         conn.close()
         return count > 0
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки отправленного: {e}")
+        detailed_logger.log_error(str(e), chat_id, "was_item_sent")
         return False
 
 def mark_item_sent(chat_id: int, item_name: str, quantity: int):
-    """Отмечает, что уведомление отправлено в канал"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -511,12 +515,11 @@ def mark_item_sent(chat_id: int, item_name: str, quantity: int):
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"❌ Ошибка отметки отправленного: {e}")
+        detailed_logger.log_error(str(e), chat_id, "mark_item_sent")
 
 # ----- СТАТИСТИКА -----
 
 def get_stats() -> Dict:
-    """Возвращает статистику бота"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -533,31 +536,34 @@ def get_stats() -> Dict:
         cur.execute("SELECT COUNT(*) FROM sent_items")
         sent_count = cur.fetchone()[0]
         
-        cur.execute("SELECT COUNT(*) FROM user_updates")
-        updates_count = cur.fetchone()[0]
-        
         cur.execute("SELECT COUNT(*) FROM user_sent_items")
         user_sent_count = cur.fetchone()[0]
         
         conn.close()
+        
+        log_stats = detailed_logger.get_stats()
         
         return {
             'users': users_count,
             'op_channels': op_count,
             'posting_channels': post_count,
             'sent_notifications': sent_count,
-            'user_updates': updates_count,
-            'user_sent_items': user_sent_count
+            'user_sent_items': user_sent_count,
+            'bot_actions': log_stats['actions'],
+            'bot_errors': log_stats['errors'],
+            'bot_uptime': log_stats['uptime']
         }
     except Exception as e:
-        logger.error(f"❌ Ошибка получения статистики: {e}")
+        detailed_logger.log_error(str(e), None, "get_stats")
         return {
             'users': 0,
             'op_channels': 0,
             'posting_channels': 0,
             'sent_notifications': 0,
-            'user_updates': 0,
-            'user_sent_items': 0
+            'user_sent_items': 0,
+            'bot_actions': 0,
+            'bot_errors': 0,
+            'bot_uptime': '0:00:00'
         }
 
 # ========== КЛАССЫ ==========
@@ -584,7 +590,6 @@ class UserSettings:
     is_admin: bool = False
     
     def __post_init__(self):
-        # Загружаем реальные настройки из БД
         db_settings = get_user_settings(self.user_id)
         self.notifications_enabled = db_settings['notifications_enabled']
         
@@ -631,7 +636,6 @@ class UserManager:
         self.load_users()
     
     def load_users(self):
-        """Загружает пользователей из БД в кэш"""
         user_ids = get_all_users()
         for user_id in user_ids:
             self.users[user_id] = UserSettings(user_id)
@@ -639,12 +643,10 @@ class UserManager:
     
     def get_user(self, user_id: int, username: str = "") -> UserSettings:
         if user_id not in self.users:
-            # Добавляем в БД если новый
             add_user_to_db(user_id, username)
             self.users[user_id] = UserSettings(user_id, username)
         elif username and self.users[user_id].username != username:
             self.users[user_id].username = username
-            # Обновляем в БД
             add_user_to_db(user_id, username)
         return self.users[user_id]
     
@@ -652,7 +654,6 @@ class UserManager:
         return list(self.users.keys())
     
     def save_users(self):
-        """Сохраняет всех пользователей (для совместимости)"""
         pass
 
 class MessageQueue:
@@ -758,14 +759,16 @@ class GardenHorizonsBot:
             'Expires': '0'
         })
         
+        # Логируем запуск
+        detailed_logger.log_action("Инициализация бота")
+        logger.info(f"🤖 Админ ID: {ADMIN_ID}")
+        
         self.setup_handlers()
         self.setup_conversation_handlers()
     
     # ========== НАСТРОЙКА ОБРАБОТЧИКОВ ==========
     
     def setup_conversation_handlers(self):
-        """Настройка всех диалогов"""
-        
         # 1. Диалог добавления канала в ОП
         add_op_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_op_start, pattern="^add_op$")],
@@ -816,19 +819,19 @@ class GardenHorizonsBot:
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
     
     async def cancel_op(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отмена добавления канала ОП"""
+        detailed_logger.log_action("Отмена добавления канала ОП", update.effective_user.id)
         await update.message.reply_text("❌ Добавление канала отменено")
         await self.show_admin_panel(update)
         return ConversationHandler.END
     
     async def cancel_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отмена добавления канала автопостинга"""
+        detailed_logger.log_action("Отмена добавления канала автопостинга", update.effective_user.id)
         await update.message.reply_text("❌ Добавление канала отменено")
         await self.show_admin_panel(update)
         return ConversationHandler.END
     
     async def cancel_mailing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отмена рассылки"""
+        detailed_logger.log_action("Отмена рассылки", update.effective_user.id)
         await update.message.reply_text("❌ Рассылка отменена")
         await self.show_admin_panel(update)
         return ConversationHandler.END
@@ -836,7 +839,6 @@ class GardenHorizonsBot:
     # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
     
     async def check_subscription(self, user_id: int) -> bool:
-        """Проверяет подписку на ВСЕ обязательные каналы"""
         if not self.required_channels:
             return True
         
@@ -898,6 +900,8 @@ class GardenHorizonsBot:
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        detailed_logger.log_action("Команда /start", user.id, user.username)
+        
         self.user_manager.get_user(user.id, user.username or user.first_name)
         
         if not await self.require_subscription(update, context):
@@ -908,11 +912,17 @@ class GardenHorizonsBot:
         await self.show_main_menu(update)
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        detailed_logger.log_action("Команда /menu", user.id)
+        
         if not await self.require_subscription(update, context):
             return
         await self.show_main_menu(update)
     
     async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        detailed_logger.log_action("Команда /settings", user.id)
+        
         if not await self.require_subscription(update, context):
             return
         user = update.effective_user
@@ -920,6 +930,9 @@ class GardenHorizonsBot:
         await self.show_main_settings(update, settings)
     
     async def cmd_stock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        detailed_logger.log_action("Команда /stock", user.id)
+        
         if not await self.require_subscription(update, context):
             return
         
@@ -936,6 +949,9 @@ class GardenHorizonsBot:
             await update.message.reply_html(message, reply_markup=reply_markup)
     
     async def cmd_notifications_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        detailed_logger.log_action("Команда /notifications_on", user.id)
+        
         if not await self.require_subscription(update, context):
             return
         user = update.effective_user
@@ -945,6 +961,9 @@ class GardenHorizonsBot:
         await update.message.reply_html("<b>✅ Уведомления успешно включены!</b>")
     
     async def cmd_notifications_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        detailed_logger.log_action("Команда /notifications_off", user.id)
+        
         if not await self.require_subscription(update, context):
             return
         user = update.effective_user
@@ -955,6 +974,8 @@ class GardenHorizonsBot:
     
     async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        detailed_logger.log_action("Команда /admin", user.id)
+        
         settings = self.user_manager.get_user(user.id)
         if not settings.is_admin:
             await update.message.reply_text("❌ У вас нет прав!")
@@ -964,6 +985,9 @@ class GardenHorizonsBot:
     # ========== АДМИН-ПАНЕЛЬ ==========
     
     async def show_admin_panel(self, update: Update):
+        user_id = update.effective_user.id if update.effective_user else None
+        detailed_logger.log_action("Открытие админ-панели", user_id)
+        
         stats = get_stats()
         
         keyboard = [
@@ -979,13 +1003,19 @@ class GardenHorizonsBot:
             f"👥 Пользователей: {stats['users']}\n"
             f"🔐 Каналов ОП: {stats['op_channels']}\n"
             f"📢 Каналов для постинга: {stats['posting_channels']}\n"
-            f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
+            f"📨 Отправлено уведомлений: {stats['sent_notifications']}\n"
+            f"📦 Отправлено предметов: {stats['user_sent_items']}\n"
+            f"🤖 Действий бота: {stats['bot_actions']}\n"
+            f"⚠️ Ошибок: {stats['bot_errors']}\n"
+            f"⏱️ Аптайм: {stats['bot_uptime']}"
         )
         
-        # Отправляем НОВОЕ сообщение, не трогая старое
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_admin_panel_callback(self, query):
+        user_id = query.from_user.id
+        detailed_logger.log_action("Открытие админ-панели (callback)", user_id)
+        
         stats = get_stats()
         
         keyboard = [
@@ -1001,15 +1031,21 @@ class GardenHorizonsBot:
             f"👥 Пользователей: {stats['users']}\n"
             f"🔐 Каналов ОП: {stats['op_channels']}\n"
             f"📢 Каналов для постинга: {stats['posting_channels']}\n"
-            f"📨 Отправлено уведомлений: {stats['sent_notifications']}"
+            f"📨 Отправлено уведомлений: {stats['sent_notifications']}\n"
+            f"📦 Отправлено предметов: {stats['user_sent_items']}\n"
+            f"🤖 Действий бота: {stats['bot_actions']}\n"
+            f"⚠️ Ошибок: {stats['bot_errors']}\n"
+            f"⏱️ Аптайм: {stats['bot_uptime']}"
         )
         
-        # Отправляем НОВОЕ сообщение, не трогая старое
         await query.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # ========== МЕНЮ НАСТРОЙКИ ОП ==========
     
     async def show_op_menu(self, query):
+        user_id = query.from_user.id
+        detailed_logger.log_action("Открытие меню ОП", user_id)
+        
         keyboard = [
             [InlineKeyboardButton("➕ Добавить канал ОП", callback_data="add_op")],
             [InlineKeyboardButton("🗑 Удалить канал ОП", callback_data="remove_op")],
@@ -1019,15 +1055,16 @@ class GardenHorizonsBot:
         
         text = "<b>🔐 НАСТРОЙКА ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ</b>\n\nВыберите действие:"
         
-        # Отправляем НОВОЕ сообщение
         await query.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
     # Добавление канала в ОП
     async def add_op_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        user_id = query.from_user.id
+        detailed_logger.log_action("Начало добавления канала ОП", user_id)
         await query.answer()
         
-        if query.from_user.id != ADMIN_ID:
+        if user_id != ADMIN_ID:
             await query.edit_message_text("❌ У вас нет прав!")
             return ConversationHandler.END
         
@@ -1039,14 +1076,20 @@ class GardenHorizonsBot:
         return ADD_OP_CHANNEL_ID
     
     async def add_op_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
         channel_id = update.message.text.strip()
+        detailed_logger.log_action("Ввод ID канала ОП", user_id, channel_id)
+        
         context.user_data['op_channel_id'] = channel_id
         await update.message.reply_text("✏️ Теперь отправьте название канала (для отображения):")
         return ADD_OP_CHANNEL_NAME
     
     async def add_op_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
         channel_name = update.message.text.strip()
         channel_id = context.user_data.get('op_channel_id')
+        
+        detailed_logger.log_action("Ввод названия канала ОП", user_id, f"{channel_name} ({channel_id})")
         
         try:
             if channel_id.startswith('@'):
@@ -1056,6 +1099,7 @@ class GardenHorizonsBot:
             
             bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
+                detailed_logger.log_error("Бот не админ канала", user_id, channel_id)
                 await update.message.reply_text(
                     "❌ Бот не является администратором этого канала!\n"
                     "Сделайте бота админом и попробуйте снова."
@@ -1067,12 +1111,14 @@ class GardenHorizonsBot:
             add_required_channel(str(chat.id), channel_name, channel_link)
             self.required_channels = get_required_channels()
             
+            detailed_logger.log_action("Канал ОП добавлен успешно", user_id, f"{channel_name} ({channel_id})")
             await update.message.reply_text(
                 f"✅ Канал <b>{channel_name}</b> добавлен в обязательную подписку!",
                 parse_mode='HTML'
             )
             
         except Exception as e:
+            detailed_logger.log_error(str(e), user_id, "add_op_name")
             await update.message.reply_text(f"❌ Ошибка: {e}")
         
         await self.show_admin_panel(update)
@@ -1081,9 +1127,12 @@ class GardenHorizonsBot:
     # Удаление канала из ОП
     async def remove_op(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        user_id = query.from_user.id
+        detailed_logger.log_action("Начало удаления канала ОП", user_id)
         await query.answer()
         
         if not self.required_channels:
+            detailed_logger.log_action("Нет каналов для удаления", user_id)
             await query.edit_message_text("📭 Нет каналов для удаления")
             await self.show_op_menu(query)
             return
@@ -1100,7 +1149,10 @@ class GardenHorizonsBot:
         )
     
     async def delete_op_channel(self, query):
+        user_id = query.from_user.id
         channel_id = query.data.replace('del_op_', '')
+        detailed_logger.log_action("Удаление канала ОП", user_id, channel_id)
+        
         remove_required_channel(channel_id)
         self.required_channels = get_required_channels()
         await query.edit_message_text("✅ Канал удален из обязательной подписки!")
@@ -1108,6 +1160,9 @@ class GardenHorizonsBot:
     
     # Список каналов ОП
     async def list_op(self, query):
+        user_id = query.from_user.id
+        detailed_logger.log_action("Просмотр списка каналов ОП", user_id)
+        
         if not self.required_channels:
             text = "📭 Нет каналов в обязательной подписке"
         else:
@@ -1121,6 +1176,9 @@ class GardenHorizonsBot:
     # ========== МЕНЮ АВТОПОСТИНГА ==========
     
     async def show_post_menu(self, query):
+        user_id = query.from_user.id
+        detailed_logger.log_action("Открытие меню автопостинга", user_id)
+        
         keyboard = [
             [InlineKeyboardButton("➕ Добавить канал", callback_data="add_post")],
             [InlineKeyboardButton("🗑 Удалить канал", callback_data="remove_post")],
@@ -1135,9 +1193,11 @@ class GardenHorizonsBot:
     # Добавление канала для автопостинга
     async def add_post_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        user_id = query.from_user.id
+        detailed_logger.log_action("Начало добавления канала автопостинга", user_id)
         await query.answer()
         
-        if query.from_user.id != ADMIN_ID:
+        if user_id != ADMIN_ID:
             await query.edit_message_text("❌ У вас нет прав!")
             return ConversationHandler.END
         
@@ -1149,14 +1209,20 @@ class GardenHorizonsBot:
         return ADD_POST_CHANNEL_ID
     
     async def add_post_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
         channel_id = update.message.text.strip()
+        detailed_logger.log_action("Ввод ID канала автопостинга", user_id, channel_id)
+        
         context.user_data['post_channel_id'] = channel_id
         await update.message.reply_text("✏️ Теперь отправьте название канала (для отображения):")
         return ADD_POST_CHANNEL_NAME
     
     async def add_post_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
         channel_name = update.message.text.strip()
         channel_id = context.user_data.get('post_channel_id')
+        
+        detailed_logger.log_action("Ввод названия канала автопостинга", user_id, f"{channel_name} ({channel_id})")
         
         try:
             if channel_id.startswith('@'):
@@ -1166,6 +1232,7 @@ class GardenHorizonsBot:
             
             bot_member = await self.application.bot.get_chat_member(chat.id, self.application.bot.id)
             if bot_member.status not in ['administrator', 'creator']:
+                detailed_logger.log_error("Бот не админ канала", user_id, channel_id)
                 await update.message.reply_text(
                     "❌ Бот не является администратором этого канала!\n"
                     "Сделайте бота админом и попробуйте снова."
@@ -1176,12 +1243,14 @@ class GardenHorizonsBot:
             add_posting_channel(str(chat.id), channel_name, chat.username)
             self.posting_channels = get_posting_channels()
             
+            detailed_logger.log_action("Канал автопостинга добавлен успешно", user_id, f"{channel_name} ({channel_id})")
             await update.message.reply_text(
                 f"✅ Канал <b>{channel_name}</b> добавлен для автопостинга!",
                 parse_mode='HTML'
             )
             
         except Exception as e:
+            detailed_logger.log_error(str(e), user_id, "add_post_name")
             await update.message.reply_text(f"❌ Ошибка: {e}")
         
         await self.show_admin_panel(update)
@@ -1190,9 +1259,12 @@ class GardenHorizonsBot:
     # Удаление канала из автопостинга
     async def remove_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        user_id = query.from_user.id
+        detailed_logger.log_action("Начало удаления канала автопостинга", user_id)
         await query.answer()
         
         if not self.posting_channels:
+            detailed_logger.log_action("Нет каналов для удаления", user_id)
             await query.edit_message_text("📭 Нет каналов для удаления")
             await self.show_post_menu(query)
             return
@@ -1209,7 +1281,10 @@ class GardenHorizonsBot:
         )
     
     async def delete_post_channel(self, query):
+        user_id = query.from_user.id
         channel_id = query.data.replace('del_post_', '')
+        detailed_logger.log_action("Удаление канала автопостинга", user_id, channel_id)
+        
         remove_posting_channel(channel_id)
         self.posting_channels = get_posting_channels()
         await query.edit_message_text("✅ Канал удален из автопостинга!")
@@ -1217,6 +1292,9 @@ class GardenHorizonsBot:
     
     # Список каналов автопостинга
     async def list_post(self, query):
+        user_id = query.from_user.id
+        detailed_logger.log_action("Просмотр списка каналов автопостинга", user_id)
+        
         if not self.posting_channels:
             text = "📭 Нет каналов для автопостинга"
         else:
@@ -1231,9 +1309,11 @@ class GardenHorizonsBot:
     
     async def mailing_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        user_id = query.from_user.id
+        detailed_logger.log_action("Начало рассылки", user_id)
         await query.answer()
         
-        if query.from_user.id != ADMIN_ID:
+        if user_id != ADMIN_ID:
             await query.edit_message_text("❌ У вас нет прав!")
             return ConversationHandler.END
         
@@ -1244,7 +1324,10 @@ class GardenHorizonsBot:
         return MAILING_TEXT
     
     async def mailing_get_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
         text = update.message.text
+        detailed_logger.log_action("Ввод текста рассылки", user_id, f"Длина: {len(text)} символов")
+        
         context.user_data['mailing_text'] = text
         
         keyboard = [
@@ -1262,19 +1345,23 @@ class GardenHorizonsBot:
     
     async def mailing_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        user_id = query.from_user.id
         await query.answer()
         
         if query.data == "mailing_no":
+            detailed_logger.log_action("Отмена рассылки", user_id)
             await query.edit_message_text("❌ Рассылка отменена")
             await self.show_admin_panel_callback(query)
             return
         
         text = context.user_data.get('mailing_text', '')
         if not text:
+            detailed_logger.log_error("Текст рассылки не найден", user_id)
             await query.edit_message_text("❌ Ошибка: текст не найден")
             await self.show_admin_panel_callback(query)
             return
         
+        detailed_logger.log_action("Подтверждение рассылки", user_id)
         await query.edit_message_text("📧 Начинаю рассылку...")
         
         success = 0
@@ -1294,6 +1381,7 @@ class GardenHorizonsBot:
                 failed += 1
                 logger.error(f"Ошибка отправки {user_id}: {e}")
         
+        detailed_logger.log_action("Рассылка завершена", query.from_user.id, f"Успешно: {success}, Ошибок: {failed}")
         await query.message.reply_text(
             f"<b>📊 ОТЧЕТ О РАССЫЛКЕ</b>\n\n"
             f"✅ Успешно: {success}\n❌ Ошибок: {failed}\n👥 Всего: {len(users)}",
@@ -1305,7 +1393,10 @@ class GardenHorizonsBot:
     # ========== СТАТИСТИКА ==========
     
     async def show_stats(self, query):
-        if query.from_user.id != ADMIN_ID:
+        user_id = query.from_user.id
+        detailed_logger.log_action("Просмотр статистики", user_id)
+        
+        if user_id != ADMIN_ID:
             return
         
         stats = get_stats()
@@ -1317,7 +1408,9 @@ class GardenHorizonsBot:
             f"📢 Каналов для постинга: {stats['posting_channels']}\n"
             f"📨 Отправлено уведомлений: {stats['sent_notifications']}\n"
             f"📦 Отправлено предметов: {stats['user_sent_items']}\n"
-            f"⏱️ Интервал проверки: {UPDATE_INTERVAL} сек"
+            f"🤖 Действий бота: {stats['bot_actions']}\n"
+            f"⚠️ Ошибок: {stats['bot_errors']}\n"
+            f"⏱️ Аптайм: {stats['bot_uptime']}"
         )
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
@@ -1327,12 +1420,10 @@ class GardenHorizonsBot:
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
+        text = update.message.text
         
-        if not settings.is_admin:
-            return
-        
-        if update.message.text == "🏠 ГЛАВНОЕ МЕНЮ":
+        if text == "🏠 ГЛАВНОЕ МЕНЮ":
+            detailed_logger.log_action("Возврат в главное меню", user.id)
             reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
             await update.message.reply_text("🔄 Возвращаюсь в главное меню...", reply_markup=reply_markup)
             await self.show_main_menu(update)
@@ -1341,13 +1432,17 @@ class GardenHorizonsBot:
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        user = update.effective_user
         await query.answer()
         
-        user = update.effective_user
+        # Логируем callback
+        detailed_logger.log_callback(query.data, user.id)
+        
         settings = self.user_manager.get_user(user.id)
         
         # Проверка подписки
         if query.data == "check_subscription":
+            detailed_logger.log_action("Проверка подписки", user.id)
             is_subscribed = await self.check_subscription(user.id)
             if is_subscribed:
                 add_user_to_db(user.id, user.username or user.first_name)
@@ -1514,6 +1609,9 @@ class GardenHorizonsBot:
     # ========== ОТОБРАЖЕНИЕ МЕНЮ ==========
     
     async def show_main_menu(self, update: Update):
+        user_id = update.effective_user.id
+        detailed_logger.log_action("Показ главного меню", user_id)
+        
         channels_text = ""
         if self.required_channels:
             channels_text = "\n\n<b>Обязательные каналы:</b>\n"
@@ -1539,6 +1637,9 @@ class GardenHorizonsBot:
     
     async def show_main_menu_callback(self, query):
         user = query.from_user
+        user_id = user.id
+        detailed_logger.log_action("Показ главного меню (callback)", user_id)
+        
         settings = self.user_manager.get_user(user.id)
         
         channels_text = ""
@@ -1647,6 +1748,9 @@ class GardenHorizonsBot:
         )
     
     async def show_stock_callback(self, query):
+        user_id = query.from_user.id
+        detailed_logger.log_action("Показ текущего стока", user_id)
+        
         await query.edit_message_media(media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>🔍 Получаю данные...</b>", parse_mode='HTML'))
         data = self.fetch_api_data(force=True)
         if not data:
@@ -1661,32 +1765,38 @@ class GardenHorizonsBot:
             )
     
     async def handle_seed_callback(self, query, settings: UserSettings):
+        user_id = query.from_user.id
         parts = query.data.split("_")
         if len(parts) >= 3:
             seed_name = "_".join(parts[2:])
             enabled = not settings.seeds[seed_name].enabled
             settings.seeds[seed_name].enabled = enabled
             update_user_setting(settings.user_id, f"seed_{seed_name}", enabled)
+            detailed_logger.log_action("Переключение семени", user_id, f"{seed_name} -> {enabled}")
             self.user_manager.save_users()
             await self.show_seeds_settings(query, settings)
     
     async def handle_gear_callback(self, query, settings: UserSettings):
+        user_id = query.from_user.id
         parts = query.data.split("_")
         if len(parts) >= 3:
             gear_name = "_".join(parts[2:])
             enabled = not settings.gear[gear_name].enabled
             settings.gear[gear_name].enabled = enabled
             update_user_setting(settings.user_id, f"gear_{gear_name}", enabled)
+            detailed_logger.log_action("Переключение снаряжения", user_id, f"{gear_name} -> {enabled}")
             self.user_manager.save_users()
             await self.show_gear_settings(query, settings)
     
     async def handle_weather_callback(self, query, settings: UserSettings):
+        user_id = query.from_user.id
         parts = query.data.split("_")
         if len(parts) >= 3:
             weather_name = "_".join(parts[2:])
             enabled = not settings.weather[weather_name].enabled
             settings.weather[weather_name].enabled = enabled
             update_user_setting(settings.user_id, f"weather_{weather_name}", enabled)
+            detailed_logger.log_action("Переключение погоды", user_id, f"{weather_name} -> {enabled}")
             self.user_manager.save_users()
             await self.show_weather_settings(query, settings)
     
@@ -1710,12 +1820,13 @@ class GardenHorizonsBot:
             logger.info(f"🔍 Запрос к API: {url}")
             response = self.session.get(url, headers=headers, timeout=10)
             
+            detailed_logger.log_api_request(url, response.status_code)
+            
             if response.status_code != 200:
                 logger.warning(f"⚠️ API вернул статус {response.status_code}")
                 return None
             
             data = response.json()
-            logger.info(f"✅ Ответ API получен")
             
             if data.get("ok") and "data" in data:
                 last_update = data["data"].get("lastGlobalUpdate", "no date")
@@ -1883,6 +1994,7 @@ class GardenHorizonsBot:
                                         msg = self.format_pm_message(user_items)
                                         if msg:
                                             await self.message_queue.queue.put((user_id, msg, 'HTML', None))
+                                            detailed_logger.log_notification(user_id, [f"{name}:{qty}" for name, qty in user_items])
                                             for name, qty in user_items:
                                                 mark_item_sent_to_user(user_id, name, qty, update_id)
                                             logger.info(f"👤 Пользователю {user_id} отправлено {len(user_items)} предметов: {user_items}")

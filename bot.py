@@ -751,7 +751,7 @@ class GardenHorizonsBot:
         self.application = Application.builder().token(token).build()
         self.user_manager = UserManager()
         self.last_data: Optional[Dict] = None
-        self.mandatory_channels = get_mandatory_channels()  # ИЗМЕНЕНО: ИСПОЛЬЗУЕМ mandatory_channels
+        self.mandatory_channels = get_mandatory_channels()
         self.posting_channels = get_posting_channels()
         self.mailing_text = None
         self.message_queue = MessageQueue(delay=0.1)
@@ -777,7 +777,7 @@ class GardenHorizonsBot:
         old_op_count = len(self.mandatory_channels)
         old_post_count = len(self.posting_channels)
         
-        self.mandatory_channels = get_mandatory_channels()  # ИЗМЕНЕНО
+        self.mandatory_channels = get_mandatory_channels()
         self.posting_channels = get_posting_channels()
         
         logger.info(f"🔄 Каналы перезагружены. ОП: {old_op_count} -> {len(self.mandatory_channels)}, Автопостинг: {old_post_count} -> {len(self.posting_channels)}")
@@ -1769,7 +1769,7 @@ class GardenHorizonsBot:
             logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
             return
         
-        # Обработка проверки подписки - ИЗ ТВОЕГО ПРИМЕРА
+        # ИСПРАВЛЕНО: Обработка проверки подписки
         if query.data == "check_our_sub":
             logger.info(f"✅ Нажата кнопка 'Я подписался' пользователем {user.id}")
             
@@ -1779,17 +1779,21 @@ class GardenHorizonsBot:
                 logger.info(f"✅ Пользователь {user.id} подписался на все каналы")
                 add_user_to_db(user.id, user.username or user.first_name)
                 
+                # Удаляем сообщение с кнопками
                 try:
                     await query.message.delete()
                 except:
                     pass
                 
-                # ИСПРАВЛЕНО: СНАЧАЛА ОТПРАВЛЯЕМ ПОДТВЕРЖДЕНИЕ, ПОТОМ МЕНЮ
+                # ИСПРАВЛЕНО: Сначала показываем подтверждение
                 await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
-                await self.show_main_menu(query.message)  # Это отправит НОВОЕ сообщение с меню
+                
+                # ИСПРАВЛЕНО: Потом отдельным сообщением показываем главное меню
+                await self.show_main_menu(query.message)
             else:
                 logger.info(f"❌ Пользователь {user.id} не подписался на все каналы")
-                await query.answer("❌ Подпишитесь на все каналы!", show_alert=True)
+                # ИСПРАВЛЕНО: Показываем alert с крестиком
+                await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
         
         # Админ-панель

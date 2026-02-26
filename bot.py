@@ -174,15 +174,16 @@ def init_database():
             )
         """)
         
-        # Таблица для истории отправленных уведомлений
+        # Таблица для истории отправленных уведомлений с update_id
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sent_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER,
                 item_name TEXT,
                 quantity INTEGER,
+                update_id TEXT,
                 sent_at TEXT,
-                UNIQUE(chat_id, item_name, quantity)
+                UNIQUE(chat_id, item_name, quantity, update_id)
             )
         """)
         
@@ -445,7 +446,7 @@ def mark_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_i
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO user_sent_items (user_id, item_name, quantity, sent_at, update_id) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO user_sent_items (user_id, item_name, quantity, sent_at, update_id) VALUES (?, ?, ?, ?, ?)",
             (user_id, item_name, quantity, datetime.now().isoformat(), update_id)
         )
         conn.commit()
@@ -453,13 +454,13 @@ def mark_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_i
     except Exception as e:
         logger.error(f"❌ Ошибка отметки отправленного предмета: {e}")
 
-def was_item_sent(chat_id: int, item_name: str, quantity: int) -> bool:
+def was_item_sent(chat_id: int, item_name: str, quantity: int, update_id: str) -> bool:
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "SELECT COUNT(*) FROM sent_items WHERE chat_id = ? AND item_name = ? AND quantity = ?",
-            (chat_id, item_name, quantity)
+            "SELECT COUNT(*) FROM sent_items WHERE chat_id = ? AND item_name = ? AND quantity = ? AND update_id = ?",
+            (chat_id, item_name, quantity, update_id)
         )
         count = cur.fetchone()[0]
         conn.close()
@@ -468,13 +469,13 @@ def was_item_sent(chat_id: int, item_name: str, quantity: int) -> bool:
         logger.error(f"❌ Ошибка проверки отправленного: {e}")
         return False
 
-def mark_item_sent(chat_id: int, item_name: str, quantity: int):
+def mark_item_sent(chat_id: int, item_name: str, quantity: int, update_id: str):
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO sent_items (chat_id, item_name, quantity, sent_at) VALUES (?, ?, ?, ?)",
-            (chat_id, item_name, quantity, datetime.now().isoformat())
+            "INSERT OR IGNORE INTO sent_items (chat_id, item_name, quantity, update_id, sent_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, item_name, quantity, update_id, datetime.now().isoformat())
         )
         conn.commit()
         conn.close()
@@ -739,11 +740,9 @@ class SubscriptionMiddleware:
         if not user:
             return True
         
-        # Для команды /start - вызываем обработчик напрямую
+        # Для команды /start - просто пропускаем, не блокируем
         if update.message and update.message.text and update.message.text.startswith('/start'):
-            self.bot.user_manager.get_user(user.id, user.username or user.first_name)
-            await self.bot.show_main_menu(update)
-            return False
+            return True
         
         # Пропускаем callback проверки подписки
         if update.callback_query and update.callback_query.data == "check_our_sub":
@@ -937,9 +936,9 @@ class GardenHorizonsBot:
         )
     
     def setup_handlers(self):
-        """Настройка обработчиков"""
+        """Настройка обработчиков - ИСПРАВЛЕННЫЙ ПОРЯДОК"""
         
-        # 1. СНАЧАЛА команды
+        # 1. СНАЧАЛА команды (они не конфликтуют с callback)
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("settings", self.cmd_settings))
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))
@@ -948,18 +947,18 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CommandHandler("admin", self.cmd_admin))
         
-        # 2. ПОТОМ ConversationHandler
+        # 2. ПОТОМ ConversationHandler с УЗКИМИ pattern
         self.application.add_handler(self.add_op_conv)
         self.application.add_handler(self.add_post_conv)
         self.application.add_handler(self.mailing_conv)
         
-        # 3. ПОТОМ обработчик callback
+        # 3. ПОТОМ ВСЕ остальные callback'и
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         
         # 4. ПОТОМ обработчик сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         
-        logger.info("✅ Обработчики зарегистрированы")
+        logger.info("✅ Обработчики зарегистрированы в правильном порядке")
     
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
     
@@ -1586,37 +1585,27 @@ class GardenHorizonsBot:
     
     async def show_stock_callback(self, query):
         """Показ текущего стока"""
-        user_id = query.from_user.id
-        logger.info(f"📦📦📦 show_stock_callback ВЫЗВАН для {user_id}")
-        
         try:
             await query.edit_message_media(
                 media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>🔍 Получаю данные...</b>", parse_mode='HTML')
             )
-            logger.info("✅ Сообщение изменено на 'Получаю данные...'")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при изменении сообщения: {e}")
+        except:
+            pass
         
         data = self.fetch_api_data(force=True)
         if not data:
-            logger.error("❌ Ошибка получения данных из API")
             await query.edit_message_media(
                 media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>❌ Ошибка получения данных</b>", parse_mode='HTML')
             )
             return
         
         message = self.format_stock_message(data)
-        logger.info(f"📝 Сформировано сообщение: {message[:50]}...")
-        
         if message:
             keyboard = [[InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]]
             await query.edit_message_media(
                 media=InputMediaPhoto(media=IMAGE_MAIN, caption=message, parse_mode='HTML'),
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
-            logger.info("✅ Сток показан")
-        else:
-            logger.warning("⚠️ Сообщение пустое")
     
     async def handle_seed_callback(self, query, settings: UserSettings):
         """Обработка настроек семян"""
@@ -1669,164 +1658,111 @@ class GardenHorizonsBot:
         query = update.callback_query
         user = update.effective_user
         
-        # ВАЖНО: СРАЗУ отвечаем, чтобы убрать "часики"
+        # СРАЗУ отвечаем, чтобы убрать "часики"
         await query.answer()
         
-        logger.info(f"🔥🔥🔥 handle_callback ВЫЗВАН для {user.id}, data: {query.data}")
+        # Получаем настройки пользователя
+        settings = self.user_manager.get_user(user.id)
         
         # ===== ПРЯМАЯ ОБРАБОТКА ВСЕХ КНОПОК =====
         if query.data == "menu_stock":
-            logger.info("📦 Обработка menu_stock")
             await self.show_stock_callback(query)
             return
         
         if query.data == "menu_main":
-            logger.info("🏠 Обработка menu_main")
             await self.show_main_menu_callback(query)
             return
         
         if query.data == "menu_settings":
-            logger.info("⚙️ Обработка menu_settings")
-            settings = self.user_manager.get_user(user.id)
             await self.show_main_settings_callback(query, settings)
             return
         
         if query.data == "notifications_on":
-            logger.info("🔔 Обработка notifications_on")
-            settings = self.user_manager.get_user(user.id)
             settings.notifications_enabled = True
             update_user_setting(user.id, 'notifications_enabled', True)
             await query.message.reply_html("<b>✅ Уведомления включены!</b>")
             return
         
         if query.data == "notifications_off":
-            logger.info("🔕 Обработка notifications_off")
-            settings = self.user_manager.get_user(user.id)
             settings.notifications_enabled = False
             update_user_setting(user.id, 'notifications_enabled', False)
             await query.message.reply_html("<b>❌ Уведомления выключены</b>")
             return
         
         if query.data == "settings_seeds":
-            logger.info("🌱 Обработка settings_seeds")
-            settings = self.user_manager.get_user(user.id)
             await self.show_seeds_settings(query, settings)
             return
         
         if query.data == "settings_gear":
-            logger.info("⚙️ Обработка settings_gear")
-            settings = self.user_manager.get_user(user.id)
             await self.show_gear_settings(query, settings)
             return
         
         if query.data == "settings_weather":
-            logger.info("🌤️ Обработка settings_weather")
-            settings = self.user_manager.get_user(user.id)
             await self.show_weather_settings(query, settings)
             return
         
         # ===== ОБРАБОТКА ТОГГЛОВ =====
         if query.data.startswith("seed_toggle_"):
-            logger.info(f"🌱 Обработка seed_toggle: {query.data}")
-            settings = self.user_manager.get_user(user.id)
             await self.handle_seed_callback(query, settings)
             return
         
         if query.data.startswith("gear_toggle_"):
-            logger.info(f"⚙️ Обработка gear_toggle: {query.data}")
-            settings = self.user_manager.get_user(user.id)
             await self.handle_gear_callback(query, settings)
             return
         
         if query.data.startswith("weather_toggle_"):
-            logger.info(f"🌤️ Обработка weather_toggle: {query.data}")
-            settings = self.user_manager.get_user(user.id)
             await self.handle_weather_callback(query, settings)
             return
         
         # ===== АДМИН-КНОПКИ =====
-        settings = self.user_manager.get_user(user.id)
+        if not settings.is_admin:
+            return
         
         if query.data == "admin_panel":
-            if not settings.is_admin:
-                await query.answer("❌ У вас нет прав!", show_alert=True)
-                return
-            logger.info("👑 Обработка admin_panel")
             await self.show_admin_panel_callback(query)
             return
         
         if query.data == "admin_op":
-            if not settings.is_admin:
-                return
-            logger.info("🔐 Обработка admin_op")
             await self.show_op_menu(query)
             return
         
         if query.data == "op_remove":
-            if not settings.is_admin:
-                return
-            logger.info("🗑 Обработка op_remove")
             await self.show_op_remove(query)
             return
         
         if query.data == "op_list":
-            if not settings.is_admin:
-                return
-            logger.info("📋 Обработка op_list")
             await self.show_op_list(query)
             return
         
         if query.data.startswith("op_del_"):
-            if not settings.is_admin:
-                return
-            logger.info(f"❌ Обработка op_del: {query.data}")
             await self.delete_op_channel(query)
             return
         
         if query.data == "admin_post":
-            if not settings.is_admin:
-                return
-            logger.info("📢 Обработка admin_post")
             await self.show_post_menu(query)
             return
         
         if query.data == "post_remove":
-            if not settings.is_admin:
-                return
-            logger.info("🗑 Обработка post_remove")
             await self.show_post_remove(query)
             return
         
         if query.data == "post_list":
-            if not settings.is_admin:
-                return
-            logger.info("📋 Обработка post_list")
             await self.show_post_list(query)
             return
         
         if query.data.startswith("post_del_"):
-            if not settings.is_admin:
-                return
-            logger.info(f"❌ Обработка post_del: {query.data}")
             await self.delete_post_channel(query)
             return
         
         if query.data == "admin_stats":
-            if not settings.is_admin:
-                return
-            logger.info("📊 Обработка admin_stats")
             await self.show_stats(query)
             return
         
         if query.data in ["mailing_yes", "mailing_no"]:
-            if not settings.is_admin:
-                return
-            logger.info(f"📧 Обработка mailing: {query.data}")
             await self.mailing_confirm(update, context)
             return
         
         if query.data == "check_our_sub":
-            logger.info(f"✅ Обработка check_our_sub для {user.id}")
             is_subscribed = await self.check_our_subscriptions(user.id)
             
             if is_subscribed:
@@ -1842,8 +1778,6 @@ class GardenHorizonsBot:
             else:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
-        
-        logger.warning(f"⚠️ Неизвестный callback: {query.data}")
     
     # ========== РАБОТА С API ==========
     
@@ -2088,10 +2022,10 @@ class GardenHorizonsBot:
                             # 1. Отправляем в ОСНОВНОЙ канал
                             if MAIN_CHANNEL_ID and main_channel_items:
                                 for name, qty in main_channel_items.items():
-                                    if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty):
+                                    if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id):
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
-                                        mark_item_sent(int(MAIN_CHANNEL_ID), name, qty)
+                                        mark_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id)
                                         logger.info(f"📢 В основной канал: {name} = {qty}")
                             
                             # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
@@ -2100,17 +2034,15 @@ class GardenHorizonsBot:
                                 try:
                                     bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
                                     if bot_member.status not in ['administrator', 'creator']:
-                                        logger.warning(f"⚠️ Бот не админ в канале {channel['name']}, пропускаю")
                                         continue
-                                except Exception as e:
-                                    logger.error(f"❌ Ошибка проверки прав в канале {channel['name']}: {e}")
+                                except:
                                     continue
                                 
                                 for name, qty in main_channel_items.items():
-                                    if not was_item_sent(int(channel['id']), name, qty):
+                                    if not was_item_sent(int(channel['id']), name, qty, update_id):
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
-                                        mark_item_sent(int(channel['id']), name, qty)
+                                        mark_item_sent(int(channel['id']), name, qty, update_id)
                                         logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
                             
                             # 3. Отправляем пользователям (личные сообщения)

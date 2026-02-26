@@ -745,7 +745,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== MIDDLEWARE ==========
+# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -765,10 +765,11 @@ class SubscriptionMiddleware:
         elif update.callback_query:
             logger.info(f"📨 Middleware: получен callback от {user.id}: {update.callback_query.data}")
         
-        # ВАЖНО: Всегда пропускаем команду /start (ДАЖЕ ДЛЯ НЕПОДПИСАННЫХ)
-        if update.message and update.message.text and update.message.text.startswith('/start'):
-            logger.info(f"🚀 Middleware: команда /start от {user.id} пропущена (без проверки подписки)")
-            return True
+        # ВАЖНО: Проверяем команду start ДО проверки подписки
+        if update.message and update.message.text:
+            if update.message.text.startswith('/start'):
+                logger.info(f"🚀 Middleware: команда /start от {user.id} пропущена (без проверки подписки)")
+                return True
         
         # ВАЖНО: Всегда пропускаем callback проверки подписки
         if update.callback_query and update.callback_query.data == "check_our_sub":
@@ -1056,6 +1057,11 @@ class GardenHorizonsBot:
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         logger.info(f"🚀🚀🚀 cmd_start ВЫЗВАН для пользователя {user.id} (@{user.username})")
+        
+        # Проверяем, что update содержит сообщение
+        if not update.message:
+            logger.error(f"❌ update.message is None для пользователя {user.id}")
+            return
         
         # Добавляем пользователя в БД
         self.user_manager.get_user(user.id, user.username or user.first_name)
@@ -1795,8 +1801,11 @@ class GardenHorizonsBot:
         
         logger.info(f"📨 Обработка сообщения от {user.id}: {text}")
         
+        # Отладка состояния диалога
+        logger.info(f"📊 Текущие данные диалога: {context.user_data}")
+        
         # Проверяем, не находимся ли мы в диалоге
-        if context.user_data.get(ADD_OP_CHANNEL_ID) or context.user_data.get(ADD_POST_CHANNEL_ID) or context.user_data.get(MAILING_TEXT):
+        if any(key in context.user_data for key in ['op_channel_id', 'post_channel_id', 'mailing_text']):
             logger.info(f"⏩ Пользователь {user.id} в диалоге, пропускаем")
             return
         

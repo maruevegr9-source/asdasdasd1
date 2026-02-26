@@ -1586,18 +1586,37 @@ class GardenHorizonsBot:
     
     async def show_stock_callback(self, query):
         """Показ текущего стока"""
-        await query.edit_message_media(media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>🔍 Получаю данные...</b>", parse_mode='HTML'))
+        user_id = query.from_user.id
+        logger.info(f"📦📦📦 show_stock_callback ВЫЗВАН для {user_id}")
+        
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>🔍 Получаю данные...</b>", parse_mode='HTML')
+            )
+            logger.info("✅ Сообщение изменено на 'Получаю данные...'")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при изменении сообщения: {e}")
+        
         data = self.fetch_api_data(force=True)
         if not data:
-            await query.edit_message_media(media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>❌ Ошибка получения данных</b>", parse_mode='HTML'))
+            logger.error("❌ Ошибка получения данных из API")
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>❌ Ошибка получения данных</b>", parse_mode='HTML')
+            )
             return
+        
         message = self.format_stock_message(data)
+        logger.info(f"📝 Сформировано сообщение: {message[:50]}...")
+        
         if message:
             keyboard = [[InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]]
             await query.edit_message_media(
                 media=InputMediaPhoto(media=IMAGE_MAIN, caption=message, parse_mode='HTML'),
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            logger.info("✅ Сток показан")
+        else:
+            logger.warning("⚠️ Сообщение пустое")
     
     async def handle_seed_callback(self, query, settings: UserSettings):
         """Обработка настроек семян"""
@@ -1650,17 +1669,164 @@ class GardenHorizonsBot:
         query = update.callback_query
         user = update.effective_user
         
-        # СРАЗУ отвечаем, чтобы убрать "часики"
+        # ВАЖНО: СРАЗУ отвечаем, чтобы убрать "часики"
         await query.answer()
         
-        settings = self.user_manager.get_user(user.id)
+        logger.info(f"🔥🔥🔥 handle_callback ВЫЗВАН для {user.id}, data: {query.data}")
         
-        # Пропускаем callback для ConversationHandler
-        if query.data in ["add_op", "add_post", "mailing"]:
+        # ===== ПРЯМАЯ ОБРАБОТКА ВСЕХ КНОПОК =====
+        if query.data == "menu_stock":
+            logger.info("📦 Обработка menu_stock")
+            await self.show_stock_callback(query)
             return
         
-        # Обработка проверки подписки
+        if query.data == "menu_main":
+            logger.info("🏠 Обработка menu_main")
+            await self.show_main_menu_callback(query)
+            return
+        
+        if query.data == "menu_settings":
+            logger.info("⚙️ Обработка menu_settings")
+            settings = self.user_manager.get_user(user.id)
+            await self.show_main_settings_callback(query, settings)
+            return
+        
+        if query.data == "notifications_on":
+            logger.info("🔔 Обработка notifications_on")
+            settings = self.user_manager.get_user(user.id)
+            settings.notifications_enabled = True
+            update_user_setting(user.id, 'notifications_enabled', True)
+            await query.message.reply_html("<b>✅ Уведомления включены!</b>")
+            return
+        
+        if query.data == "notifications_off":
+            logger.info("🔕 Обработка notifications_off")
+            settings = self.user_manager.get_user(user.id)
+            settings.notifications_enabled = False
+            update_user_setting(user.id, 'notifications_enabled', False)
+            await query.message.reply_html("<b>❌ Уведомления выключены</b>")
+            return
+        
+        if query.data == "settings_seeds":
+            logger.info("🌱 Обработка settings_seeds")
+            settings = self.user_manager.get_user(user.id)
+            await self.show_seeds_settings(query, settings)
+            return
+        
+        if query.data == "settings_gear":
+            logger.info("⚙️ Обработка settings_gear")
+            settings = self.user_manager.get_user(user.id)
+            await self.show_gear_settings(query, settings)
+            return
+        
+        if query.data == "settings_weather":
+            logger.info("🌤️ Обработка settings_weather")
+            settings = self.user_manager.get_user(user.id)
+            await self.show_weather_settings(query, settings)
+            return
+        
+        # ===== ОБРАБОТКА ТОГГЛОВ =====
+        if query.data.startswith("seed_toggle_"):
+            logger.info(f"🌱 Обработка seed_toggle: {query.data}")
+            settings = self.user_manager.get_user(user.id)
+            await self.handle_seed_callback(query, settings)
+            return
+        
+        if query.data.startswith("gear_toggle_"):
+            logger.info(f"⚙️ Обработка gear_toggle: {query.data}")
+            settings = self.user_manager.get_user(user.id)
+            await self.handle_gear_callback(query, settings)
+            return
+        
+        if query.data.startswith("weather_toggle_"):
+            logger.info(f"🌤️ Обработка weather_toggle: {query.data}")
+            settings = self.user_manager.get_user(user.id)
+            await self.handle_weather_callback(query, settings)
+            return
+        
+        # ===== АДМИН-КНОПКИ =====
+        settings = self.user_manager.get_user(user.id)
+        
+        if query.data == "admin_panel":
+            if not settings.is_admin:
+                await query.answer("❌ У вас нет прав!", show_alert=True)
+                return
+            logger.info("👑 Обработка admin_panel")
+            await self.show_admin_panel_callback(query)
+            return
+        
+        if query.data == "admin_op":
+            if not settings.is_admin:
+                return
+            logger.info("🔐 Обработка admin_op")
+            await self.show_op_menu(query)
+            return
+        
+        if query.data == "op_remove":
+            if not settings.is_admin:
+                return
+            logger.info("🗑 Обработка op_remove")
+            await self.show_op_remove(query)
+            return
+        
+        if query.data == "op_list":
+            if not settings.is_admin:
+                return
+            logger.info("📋 Обработка op_list")
+            await self.show_op_list(query)
+            return
+        
+        if query.data.startswith("op_del_"):
+            if not settings.is_admin:
+                return
+            logger.info(f"❌ Обработка op_del: {query.data}")
+            await self.delete_op_channel(query)
+            return
+        
+        if query.data == "admin_post":
+            if not settings.is_admin:
+                return
+            logger.info("📢 Обработка admin_post")
+            await self.show_post_menu(query)
+            return
+        
+        if query.data == "post_remove":
+            if not settings.is_admin:
+                return
+            logger.info("🗑 Обработка post_remove")
+            await self.show_post_remove(query)
+            return
+        
+        if query.data == "post_list":
+            if not settings.is_admin:
+                return
+            logger.info("📋 Обработка post_list")
+            await self.show_post_list(query)
+            return
+        
+        if query.data.startswith("post_del_"):
+            if not settings.is_admin:
+                return
+            logger.info(f"❌ Обработка post_del: {query.data}")
+            await self.delete_post_channel(query)
+            return
+        
+        if query.data == "admin_stats":
+            if not settings.is_admin:
+                return
+            logger.info("📊 Обработка admin_stats")
+            await self.show_stats(query)
+            return
+        
+        if query.data in ["mailing_yes", "mailing_no"]:
+            if not settings.is_admin:
+                return
+            logger.info(f"📧 Обработка mailing: {query.data}")
+            await self.mailing_confirm(update, context)
+            return
+        
         if query.data == "check_our_sub":
+            logger.info(f"✅ Обработка check_our_sub для {user.id}")
             is_subscribed = await self.check_our_subscriptions(user.id)
             
             if is_subscribed:
@@ -1677,136 +1843,7 @@ class GardenHorizonsBot:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
         
-        # Админ-панель
-        if query.data == "admin_panel":
-            if not settings.is_admin:
-                await query.answer("❌ У вас нет прав!", show_alert=True)
-                return
-            await self.show_admin_panel_callback(query)
-            return
-        
-        # Меню ОП
-        if query.data == "admin_op":
-            if not settings.is_admin:
-                return
-            await self.show_op_menu(query)
-            return
-        
-        # Удаление из ОП
-        if query.data == "op_remove":
-            if not settings.is_admin:
-                return
-            await self.show_op_remove(query)
-            return
-        
-        # Список ОП
-        if query.data == "op_list":
-            if not settings.is_admin:
-                return
-            await self.show_op_list(query)
-            return
-        
-        # Удаление конкретного канала из ОП
-        if query.data.startswith("op_del_"):
-            if not settings.is_admin:
-                return
-            await self.delete_op_channel(query)
-            return
-        
-        # Меню автопостинга
-        if query.data == "admin_post":
-            if not settings.is_admin:
-                return
-            await self.show_post_menu(query)
-            return
-        
-        # Удаление из автопостинга
-        if query.data == "post_remove":
-            if not settings.is_admin:
-                return
-            await self.show_post_remove(query)
-            return
-        
-        # Список автопостинга
-        if query.data == "post_list":
-            if not settings.is_admin:
-                return
-            await self.show_post_list(query)
-            return
-        
-        # Удаление конкретного канала из автопостинга
-        if query.data.startswith("post_del_"):
-            if not settings.is_admin:
-                return
-            await self.delete_post_channel(query)
-            return
-        
-        # Статистика
-        if query.data == "admin_stats":
-            if not settings.is_admin:
-                return
-            await self.show_stats(query)
-            return
-        
-        # Подтверждение рассылки
-        if query.data in ["mailing_yes", "mailing_no"]:
-            if not settings.is_admin:
-                return
-            await self.mailing_confirm(update, context)
-            return
-        
-        # Главное меню
-        if query.data == "menu_main":
-            await self.show_main_menu_callback(query)
-            return
-        
-        # Меню настроек
-        if query.data == "menu_settings":
-            await self.show_main_settings_callback(query, settings)
-            return
-        
-        # Сток - ВАЖНО!
-        if query.data == "menu_stock":
-            await self.show_stock_callback(query)
-            return
-        
-        # Уведомления
-        if query.data == "notifications_on":
-            settings.notifications_enabled = True
-            update_user_setting(user.id, 'notifications_enabled', True)
-            await query.message.reply_html("<b>✅ Уведомления включены!</b>")
-            return
-        
-        if query.data == "notifications_off":
-            settings.notifications_enabled = False
-            update_user_setting(user.id, 'notifications_enabled', False)
-            await query.message.reply_html("<b>❌ Уведомления выключены</b>")
-            return
-        
-        # Настройки категорий
-        if query.data == "settings_seeds":
-            await self.show_seeds_settings(query, settings)
-            return
-        
-        if query.data.startswith("seed_toggle_"):
-            await self.handle_seed_callback(query, settings)
-            return
-        
-        if query.data == "settings_gear":
-            await self.show_gear_settings(query, settings)
-            return
-        
-        if query.data.startswith("gear_toggle_"):
-            await self.handle_gear_callback(query, settings)
-            return
-        
-        if query.data == "settings_weather":
-            await self.show_weather_settings(query, settings)
-            return
-        
-        if query.data.startswith("weather_toggle_"):
-            await self.handle_weather_callback(query, settings)
-            return
+        logger.warning(f"⚠️ Неизвестный callback: {query.data}")
     
     # ========== РАБОТА С API ==========
     

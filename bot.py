@@ -745,7 +745,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE ==========
+# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE С ПРЯМЫМ ВЫЗОВОМ ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -765,11 +765,18 @@ class SubscriptionMiddleware:
         elif update.callback_query:
             logger.info(f"📨 Middleware: получен callback от {user.id}: {update.callback_query.data}")
         
-        # ВАЖНО: Проверяем команду start ДО проверки подписки
-        if update.message and update.message.text:
-            if update.message.text.startswith('/start'):
-                logger.info(f"🚀 Middleware: команда /start от {user.id} пропущена (без проверки подписки)")
-                return True
+        # ВАЖНО: Для команды /start - ВЫЗЫВАЕМ ОБРАБОТЧИК НАПРЯМУЮ
+        if update.message and update.message.text and update.message.text.startswith('/start'):
+            logger.info(f"🚀🚀🚀 Middleware: команда /start от {user.id} - ВЫЗЫВАЮ ОБРАБОТЧИК НАПРЯМУЮ")
+            
+            # Добавляем пользователя в БД
+            self.bot.user_manager.get_user(user.id, user.username or user.first_name)
+            
+            # Показываем главное меню
+            await self.bot.show_main_menu(update)
+            
+            logger.info(f"✅ Middleware: меню отправлено пользователю {user.id}")
+            return False  # Блокируем дальнейшую обработку, т.к. уже обработали
         
         # ВАЖНО: Всегда пропускаем callback проверки подписки
         if update.callback_query and update.callback_query.data == "check_our_sub":
@@ -897,7 +904,7 @@ class GardenHorizonsBot:
             logger.info(f"✅ Middleware: передаем update дальше")
             await self.application._process_update(update)
         else:
-            logger.info(f"⏭️ Middleware заблокировал обработку update")
+            logger.info(f"⏭️ Middleware заблокировал обработку update (уже обработано)")
     
     def reload_channels(self):
         """Перезагружает каналы из БД"""
@@ -1008,9 +1015,9 @@ class GardenHorizonsBot:
         )
     
     def setup_handlers(self):
-        """Настройка обработчиков - ИСПРАВЛЕННЫЙ ПОРЯДОК"""
+        """Настройка обработчиков"""
         
-        # 1. СНАЧАЛА команды (особенно start должен быть ПЕРВЫМ)
+        # 1. СНАЧАЛА команды
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("settings", self.cmd_settings))
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))

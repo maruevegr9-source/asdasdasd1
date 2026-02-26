@@ -745,7 +745,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== MIDDLEWARE ==========
+# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -759,19 +759,25 @@ class SubscriptionMiddleware:
         if not user:
             return True
         
-        # ВАЖНО: Всегда пропускаем админа
-        if user.id == ADMIN_ID:
-            logger.info(f"👑 Middleware: админ {user.id} пропущен")
-            return True
+        # ВАЖНО: Всегда логируем все входящие запросы
+        if update.message:
+            logger.info(f"📨 Middleware: получено сообщение от {user.id}: {update.message.text}")
+        elif update.callback_query:
+            logger.info(f"📨 Middleware: получен callback от {user.id}: {update.callback_query.data}")
         
-        # ВАЖНО: Всегда пропускаем команду /start
+        # ВАЖНО: Всегда пропускаем команду /start (ДАЖЕ ДЛЯ НЕПОДПИСАННЫХ)
         if update.message and update.message.text and update.message.text.startswith('/start'):
-            logger.info(f"🚀 Middleware: команда /start от {user.id} пропущена")
+            logger.info(f"🚀 Middleware: команда /start от {user.id} пропущена (без проверки подписки)")
             return True
         
         # ВАЖНО: Всегда пропускаем callback проверки подписки
         if update.callback_query and update.callback_query.data == "check_our_sub":
             logger.info(f"✅ Middleware: callback check_our_sub от {user.id} пропущен")
+            return True
+        
+        # Пропускаем админа без проверки
+        if user.id == ADMIN_ID:
+            logger.info(f"👑 Middleware: админ {user.id} пропущен")
             return True
         
         # Для всех остальных запросов проверяем подписку
@@ -888,6 +894,8 @@ class GardenHorizonsBot:
         if should_continue:
             # Если middleware пропустил, вызываем оригинальный process_update
             await self.application._process_update(update)
+        else:
+            logger.info(f"⏭️ Middleware заблокировал обработку update")
     
     def reload_channels(self):
         """Перезагружает каналы из БД"""
@@ -1049,7 +1057,7 @@ class GardenHorizonsBot:
         # Добавляем пользователя в БД
         self.user_manager.get_user(user.id, user.username or user.first_name)
         
-        # Показываем главное меню
+        # Показываем главное меню (подписка уже проверена в middleware)
         await self.show_main_menu(update)
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2305,20 +2313,38 @@ class GardenHorizonsBot:
         
         await self.application.updater.start_polling()
         
+        # Держим бот запущенным
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(10)
+            logger.debug("💓 Бот работает...")
 
 async def main():
-    if not BOT_TOKEN:
-        logger.error("❌ Нет BOT_TOKEN")
-        return
-    
-    bot = GardenHorizonsBot(BOT_TOKEN)
-    
     try:
+        logger.info("🔍 Проверка переменных окружения:")
+        logger.info(f"  BOT_TOKEN: {'✅' if BOT_TOKEN else '❌'}")
+        logger.info(f"  MAIN_CHANNEL_ID: {MAIN_CHANNEL_ID}")
+        logger.info(f"  API_URL: {API_URL}")
+        logger.info(f"  ADMIN_ID: {ADMIN_ID}")
+        
+        if not BOT_TOKEN:
+            logger.error("❌ BOT_TOKEN не найден в переменных окружения!")
+            return
+        
+        logger.info("🚀 Инициализация бота...")
+        bot = GardenHorizonsBot(BOT_TOKEN)
+        
+        logger.info("✅ Бот инициализирован, запуск...")
         await bot.run()
-    except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен")
+        
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка в main: {e}", exc_info=True)
+        await asyncio.sleep(2)
+        raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Фатальная ошибка: {e}")

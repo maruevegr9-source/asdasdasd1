@@ -4,7 +4,7 @@ import asyncio
 import random
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass, field
 
@@ -37,6 +37,9 @@ DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 API_URL = os.getenv("API_URL", "https://garden-horizons-stock.dawidfc.workers.dev/api/stock")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))
 ADMIN_ID = 8025951500
+
+# Часовой пояс Москвы (UTC+3)
+MSK_TIMEZONE = timezone(timedelta(hours=3))
 
 # База данных
 if os.environ.get('RAILWAY_ENVIRONMENT'):
@@ -129,6 +132,19 @@ def is_weather_active(weather_data: Dict) -> bool:
     
     logger.debug(f"🌤️ Погода активна (нет timestamp)")
     return True
+
+def get_msk_time_from_timestamp(timestamp: int) -> str:
+    """Конвертирует timestamp в московское время"""
+    try:
+        # Создаем datetime из timestamp (UTC)
+        dt_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        # Конвертируем в московское время (UTC+3)
+        dt_msk = dt_utc.astimezone(MSK_TIMEZONE)
+        # Возвращаем в формате ЧЧ:ММ:СС
+        return dt_msk.strftime("%H:%M:%S")
+    except Exception as e:
+        logger.error(f"❌ Ошибка конвертации времени: {e}")
+        return "??:??:??"
 
 # ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 
@@ -849,7 +865,7 @@ class GardenHorizonsBot:
                 logger.info(f"Нет каналов ОП, пропускаем проверку")
                 return True
             
-            # ИСПРАВЛЕННЫЙ ТЕКСТ ПО ТВОЕМУ ЖЕЛАНИЮ
+            # ИСПРАВЛЕННЫЙ ТЕКСТ - ТЕПЕРЬ ПОКАЗЫВАЕТ НАЗВАНИЯ КАНАЛОВ
             text = "📢 Для использования бота необходимо подписаться на каналы 👇\n\n"
             buttons = []
             
@@ -1768,8 +1784,9 @@ class GardenHorizonsBot:
                 except:
                     pass
                 
-                # СРАЗУ ПОКАЗЫВАЕМ ГЛАВНОЕ МЕНЮ (без лишнего сообщения)
-                await self.show_main_menu(query.message)
+                # ИСПРАВЛЕНО: СНАЧАЛА ОТПРАВЛЯЕМ ПОДТВЕРЖДЕНИЕ, ПОТОМ МЕНЮ
+                await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                await self.show_main_menu(query.message)  # Это отправит НОВОЕ сообщение с меню
             else:
                 logger.info(f"❌ Пользователь {user.id} не подписался на все каналы")
                 await query.answer("❌ Подпишитесь на все каналы!", show_alert=True)
@@ -1974,12 +1991,9 @@ class GardenHorizonsBot:
                 end_timestamp = weather_data.get("endTimestamp")
                 
                 if end_timestamp and wtype in TRANSLATIONS:
-                    try:
-                        end_time = datetime.fromtimestamp(end_timestamp)
-                        time_str = end_time.strftime("%H:%M:%S")
-                        parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {time_str}")
-                    except:
-                        parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
+                    # ИСПРАВЛЕНИЕ: Конвертируем в московское время
+                    msk_time = get_msk_time_from_timestamp(end_timestamp)
+                    parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {msk_time} (МСК)")
                 elif wtype in TRANSLATIONS:
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
             else:
@@ -2023,13 +2037,13 @@ class GardenHorizonsBot:
         return message
     
     def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
-        """Формирует сообщение о начале погоды"""
+        """Формирует сообщение о начале погоды с московским временем"""
         translated = translate(weather_type)
         if end_timestamp:
             try:
-                end_time = datetime.fromtimestamp(end_timestamp)
-                time_str = end_time.strftime("%H:%M:%S")
-                return f"<b>🌤️ Началась погода {translated}! Активна до {time_str}</b>"
+                # ИСПРАВЛЕНИЕ: Конвертируем в московское время
+                msk_time = get_msk_time_from_timestamp(end_timestamp)
+                return f"<b>🌤️ Началась погода {translated}! Активна до {msk_time} (МСК)</b>"
             except:
                 return f"<b>🌤️ Началась погода {translated}!</b>"
         return f"<b>🌤️ Началась погода {translated}!</b>"

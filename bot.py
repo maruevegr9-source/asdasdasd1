@@ -745,7 +745,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE ==========
+# ========== MIDDLEWARE ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -893,6 +893,7 @@ class GardenHorizonsBot:
         
         if should_continue:
             # Если middleware пропустил, вызываем оригинальный process_update
+            logger.info(f"✅ Middleware: передаем update дальше")
             await self.application._process_update(update)
         else:
             logger.info(f"⏭️ Middleware заблокировал обработку update")
@@ -1006,14 +1007,9 @@ class GardenHorizonsBot:
         )
     
     def setup_handlers(self):
-        """Настройка обработчиков"""
+        """Настройка обработчиков - ИСПРАВЛЕННЫЙ ПОРЯДОК"""
         
-        # 1. СНАЧАЛА ConversationHandler
-        self.application.add_handler(self.add_op_conv)
-        self.application.add_handler(self.add_post_conv)
-        self.application.add_handler(self.mailing_conv)
-        
-        # 2. ПОТОМ команды
+        # 1. СНАЧАЛА команды (особенно start должен быть ПЕРВЫМ)
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("settings", self.cmd_settings))
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))
@@ -1022,11 +1018,18 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CommandHandler("admin", self.cmd_admin))
         
+        # 2. ПОТОМ ConversationHandler
+        self.application.add_handler(self.add_op_conv)
+        self.application.add_handler(self.add_post_conv)
+        self.application.add_handler(self.mailing_conv)
+        
         # 3. ПОТОМ обработчик callback
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         
         # 4. ПОТОМ обработчик сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        
+        logger.info("✅ Обработчики зарегистрированы")
     
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
     
@@ -1052,13 +1055,15 @@ class GardenHorizonsBot:
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        logger.info(f"🚀 Команда /start от пользователя {user.id} (@{user.username})")
+        logger.info(f"🚀🚀🚀 cmd_start ВЫЗВАН для пользователя {user.id} (@{user.username})")
         
         # Добавляем пользователя в БД
         self.user_manager.get_user(user.id, user.username or user.first_name)
         
-        # Показываем главное меню (подписка уже проверена в middleware)
+        # Показываем главное меню
+        logger.info(f"📋 Пытаюсь показать меню пользователю {user.id}")
         await self.show_main_menu(update)
+        logger.info(f"✅ Меню отправлено пользователю {user.id}")
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -1565,7 +1570,7 @@ class GardenHorizonsBot:
         """Показ главного меню"""
         user = update.effective_user
         user_id = user.id
-        logger.info(f"🌱 Показ главного меню пользователю {user_id}")
+        logger.info(f"🌱🌱🌱 show_main_menu вызван для пользователя {user_id}")
         
         settings = self.user_manager.get_user(user.id)
         
@@ -1586,6 +1591,7 @@ class GardenHorizonsBot:
         if update.message:
             await update.message.reply_text("🔄 <b>Обновляю меню...</b>", reply_markup=reply_markup_remove, parse_mode='HTML')
             await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+            logger.info(f"✅ Меню отправлено через reply_photo пользователю {user_id}")
         elif update.callback_query:
             await self.show_main_menu_callback(update.callback_query)
     
@@ -1614,8 +1620,11 @@ class GardenHorizonsBot:
                 media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
-        except:
+            logger.info(f"✅ Меню отредактировано через callback для пользователя {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при редактировании меню: {e}")
             await query.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+            logger.info(f"✅ Меню отправлено новым сообщением для пользователя {user_id}")
     
     async def show_main_settings(self, update: Update, settings: UserSettings):
         """Показ настроек"""
@@ -1784,8 +1793,11 @@ class GardenHorizonsBot:
         user = update.effective_user
         text = update.message.text
         
+        logger.info(f"📨 Обработка сообщения от {user.id}: {text}")
+        
         # Проверяем, не находимся ли мы в диалоге
         if context.user_data.get(ADD_OP_CHANNEL_ID) or context.user_data.get(ADD_POST_CHANNEL_ID) or context.user_data.get(MAILING_TEXT):
+            logger.info(f"⏩ Пользователь {user.id} в диалоге, пропускаем")
             return
         
         if text == "🏠 ГЛАВНОЕ МЕНЮ":

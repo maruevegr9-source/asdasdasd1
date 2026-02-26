@@ -108,30 +108,17 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
 
 def is_weather_active(weather_data: Dict) -> bool:
     """Проверяет, активна ли погода с учетом времени окончания"""
-    if not weather_data:
-        logger.debug("🌤️ Нет данных о погоде")
-        return False
-    
-    if not weather_data.get("active"):
-        logger.debug("🌤️ Погода не активна по флагу active")
+    if not weather_data or not weather_data.get("active"):
         return False
     
     end_timestamp = weather_data.get("endTimestamp")
     if end_timestamp:
         current_time = int(time.time())
-        if current_time >= end_timestamp:
-            logger.info(f"🌤️ Погода закончилась по таймеру: current={current_time}, end={end_timestamp}")
-            return False
-        else:
-            time_left = end_timestamp - current_time
-            logger.debug(f"🌤️ Погода активна, осталось {time_left} сек")
-            return True
+        return current_time < end_timestamp
     
-    logger.debug(f"🌤️ Погода активна (нет timestamp)")
     return True
 
 # ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
-
 def init_database():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -147,12 +134,11 @@ def init_database():
             )
         """)
         
+        # ИЗМЕНЕНО: Таблица обязательных каналов теперь называется mandatory_channels
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS required_channels (
+            CREATE TABLE IF NOT EXISTS mandatory_channels (
                 channel_id TEXT PRIMARY KEY,
-                name TEXT,
-                link TEXT,
-                added_at TEXT
+                channel_name TEXT
             )
         """)
         
@@ -315,12 +301,13 @@ def get_users_count() -> int:
         logger.error(f"❌ Ошибка получения количества пользователей: {e}")
         return 0
 
-def get_required_channels() -> List[Dict]:
+# ========== ФУНКЦИИ ДЛЯ ОП - ИЗ ВАШЕГО ПРИМЕРА ==========
+def get_mandatory_channels() -> List[Dict]:
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT channel_id, name, link FROM required_channels ORDER BY added_at")
-        channels = [{'id': row[0], 'name': row[1], 'link': row[2]} for row in cur.fetchall()]
+        cur.execute("SELECT channel_id, channel_name FROM mandatory_channels ORDER BY channel_id")
+        channels = [{'id': row[0], 'name': row[1]} for row in cur.fetchall()]
         conn.close()
         logger.info(f"📥 Загружено {len(channels)} каналов ОП из БД")
         for ch in channels:
@@ -330,25 +317,25 @@ def get_required_channels() -> List[Dict]:
         logger.error(f"❌ Ошибка получения каналов ОП: {e}")
         return []
 
-def add_required_channel(channel_id: str, name: str, link: str):
+def add_mandatory_channel(channel_id: str, channel_name: str):
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT OR REPLACE INTO required_channels (channel_id, name, link, added_at) VALUES (?, ?, ?, ?)",
-            (str(channel_id), name, link, datetime.now().isoformat())
+            "INSERT OR REPLACE INTO mandatory_channels (channel_id, channel_name) VALUES (?, ?)",
+            (str(channel_id), channel_name)
         )
         conn.commit()
         conn.close()
-        logger.info(f"✅ Канал ОП добавлен в БД: {name} ({channel_id})")
+        logger.info(f"✅ Канал ОП добавлен в БД: {channel_name} ({channel_id})")
     except Exception as e:
         logger.error(f"❌ Ошибка добавления канала ОП в БД: {e}")
 
-def remove_required_channel(channel_id: str):
+def remove_mandatory_channel(channel_id: str):
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("DELETE FROM required_channels WHERE channel_id = ?", (str(channel_id),))
+        cur.execute("DELETE FROM mandatory_channels WHERE channel_id = ?", (str(channel_id),))
         conn.commit()
         conn.close()
         logger.info(f"✅ Канал ОП удален из БД: {channel_id}")
@@ -480,7 +467,7 @@ def get_stats() -> Dict:
         cur.execute("SELECT COUNT(*) FROM users")
         users_count = cur.fetchone()[0]
         
-        cur.execute("SELECT COUNT(*) FROM required_channels")
+        cur.execute("SELECT COUNT(*) FROM mandatory_channels")
         op_count = cur.fetchone()[0]
         
         cur.execute("SELECT COUNT(*) FROM posting_channels")
@@ -689,7 +676,7 @@ class GardenHorizonsBot:
         self.application = Application.builder().token(token).build()
         self.user_manager = UserManager()
         self.last_data: Optional[Dict] = None
-        self.required_channels = get_required_channels()
+        self.mandatory_channels = get_mandatory_channels()  # ИЗМЕНЕНО
         self.posting_channels = get_posting_channels()
         self.mailing_text = None
         self.message_queue = MessageQueue(delay=0.1)
@@ -707,24 +694,144 @@ class GardenHorizonsBot:
         self.setup_handlers()
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
-        logger.info(f"📢 Каналов ОП: {len(self.required_channels)}")
+        logger.info(f"📢 Каналов ОП: {len(self.mandatory_channels)}")
         logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
     
     def reload_channels(self):
-        old_op_count = len(self.required_channels)
+        """Перезагружает каналы из БД"""
+        old_op_count = len(self.mandatory_channels)
         old_post_count = len(self.posting_channels)
         
-        self.required_channels = get_required_channels()
+        self.mandatory_channels = get_mandatory_channels()  # ИЗМЕНЕНО
         self.posting_channels = get_posting_channels()
         
-        logger.info(f"🔄 Каналы перезагружены. ОП: {old_op_count} -> {len(self.required_channels)}, Автопостинг: {old_post_count} -> {len(self.posting_channels)}")
+        logger.info(f"🔄 Каналы перезагружены. ОП: {old_op_count} -> {len(self.mandatory_channels)}, Автопостинг: {old_post_count} -> {len(self.posting_channels)}")
         
-        if self.required_channels:
+        if self.mandatory_channels:
             logger.info(f"📋 Список каналов ОП:")
-            for ch in self.required_channels:
+            for ch in self.mandatory_channels:
                 logger.info(f"  - {ch['name']} ({ch['id']})")
         
-        return self.required_channels
+        return self.mandatory_channels
+    
+    # ========== ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ - ИЗ ВАШЕГО ПРИМЕРА ==========
+    async def get_chat_id_safe(self, identifier):
+        """Безопасное получение ID чата (как в вашем примере)"""
+        try:
+            chat = await self.application.bot.get_chat(identifier)
+            return chat.id
+        except Exception as e:
+            logger.error(f"Ошибка при получении чата {identifier}: {e}")
+            if isinstance(identifier, str) and identifier.lstrip('-').isdigit():
+                return int(identifier)
+            return identifier
+    
+    async def check_our_subscriptions(self, user_id: int) -> bool:
+        """Проверка подписки на наши каналы - КАК В ВАШЕМ ПРИМЕРЕ"""
+        channels = self.reload_channels()
+        
+        if not channels:
+            logger.info(f"Нет обязательных каналов для пользователя {user_id}")
+            return True
+        
+        logger.info(f"🔍 Проверка ОП для пользователя {user_id} на {len(channels)} каналов")
+        
+        for channel in channels:
+            channel_id_str = channel['id']
+            channel_name = channel['name']
+            
+            logger.info(f"  Канал: {channel_name} ({channel_id_str})")
+            
+            try:
+                chat_id = await self.get_chat_id_safe(channel_id_str)
+                
+                if chat_id is None:
+                    logger.error(f"    ❌ Не удалось получить chat_id для {channel_id_str}")
+                    return False
+                
+                member = await self.application.bot.get_chat_member(chat_id, user_id)
+                status = member.status
+                logger.info(f"    Статус: {status}")
+                
+                if status not in ["member", "administrator", "creator", "restricted"]:
+                    logger.info(f"    ❌ Не подписан на {channel_name}")
+                    return False
+                else:
+                    logger.info(f"    ✅ Подписан на {channel_name}")
+                    
+            except Exception as e:
+                logger.error(f"    ❌ Ошибка проверки подписки: {e}")
+                return False
+        
+        logger.info(f"✅ Все проверки пройдены для {user_id}")
+        return True
+    
+    async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        user = update.effective_user
+        settings = self.user_manager.get_user(user.id)
+        
+        if settings.is_admin:
+            logger.info(f"👑 Админ {user.id} пропущен без проверки подписки")
+            return True
+        
+        logger.info(f"🔍 require_subscription для пользователя {user.id}")
+        is_subscribed = await self.check_our_subscriptions(user.id)
+        
+        if not is_subscribed:
+            channels = self.reload_channels()
+            
+            if not channels:
+                logger.info(f"Нет каналов ОП, пропускаем проверку")
+                return True
+            
+            text = "📢 Для использования бота необходимо подписаться на каналы:\n\n"
+            text += "🔹 Наши каналы:\n"
+            buttons = []
+            
+            for channel in channels:
+                text += f"▪️ {channel['name']}\n"
+                
+                channel_id = channel['id']
+                if channel_id.startswith('@'):
+                    url = f"https://t.me/{channel_id.lstrip('@')}"
+                else:
+                    try:
+                        chat = await self.application.bot.get_chat(int(channel_id))
+                        if chat.username:
+                            url = f"https://t.me/{chat.username}"
+                        else:
+                            url = f"tg://resolve?domain={channel_id}"
+                    except:
+                        url = f"tg://resolve?domain={channel_id}"
+                
+                buttons.append([InlineKeyboardButton(text=f"📢 {channel['name']}", url=url)])
+            
+            buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_our_sub")])
+            
+            if update.message:
+                await update.message.reply_photo(
+                    photo=IMAGE_MAIN,
+                    caption=f"<b>{text}</b>",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                )
+            elif update.callback_query:
+                try:
+                    await update.callback_query.edit_message_media(
+                        media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                    )
+                except:
+                    await update.callback_query.message.reply_photo(
+                        photo=IMAGE_MAIN,
+                        caption=f"<b>{text}</b>",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                    )
+            
+            return False
+        
+        logger.info(f"✅ Пользователь {user.id} подписан на все каналы")
+        add_user_to_db(user.id, user.username or user.first_name)
+        return True
     
     def setup_conversation_handlers(self):
         self.add_op_conv = ConversationHandler(
@@ -793,107 +900,6 @@ class GardenHorizonsBot:
         await update.message.reply_text("❌ <b>Рассылка отменена</b>", parse_mode='HTML')
         await self.show_admin_panel(update)
         return ConversationHandler.END
-    
-    async def check_subscription(self, user_id: int) -> bool:
-        channels = self.reload_channels()
-        
-        if not channels:
-            logger.info(f"Нет обязательных каналов для пользователя {user_id}")
-            return True
-        
-        logger.info(f"🔍 Проверка подписки для пользователя {user_id} на {len(channels)} каналов")
-        
-        for channel in channels:
-            try:
-                channel_id_str = channel['id']
-                channel_name = channel['name']
-                
-                logger.info(f"  Проверка канала: {channel_name} ({channel_id_str})")
-                
-                if channel_id_str.startswith('@'):
-                    chat_id = channel_id_str
-                else:
-                    try:
-                        chat_id = int(channel_id_str)
-                    except ValueError:
-                        logger.error(f"  ❌ Не удалось преобразовать ID канала: {channel_id_str}")
-                        return False
-                
-                try:
-                    member = await self.application.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-                    
-                    if member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER, ChatMember.RESTRICTED]:
-                        logger.info(f"  ❌ Пользователь {user_id} не подписан на {channel_name} (статус: {member.status})")
-                        return False
-                    else:
-                        logger.info(f"  ✅ Пользователь подписан на {channel_name} (статус: {member.status})")
-                        
-                except Exception as e:
-                    logger.error(f"  ❌ Ошибка получения информации о подписке: {e}")
-                    return False
-                    
-            except Exception as e:
-                logger.error(f"❌ Общая ошибка проверки канала {channel.get('id', 'unknown')}: {e}")
-                return False
-        
-        logger.info(f"✅ Все проверки пройдены для пользователя {user_id}")
-        return True
-    
-    async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
-        
-        if settings.is_admin:
-            logger.info(f"👑 Админ {user.id} пропущен без проверки подписки")
-            return True
-        
-        logger.info(f"🔍 require_subscription для пользователя {user.id}")
-        is_subscribed = await self.check_subscription(user.id)
-        
-        if not is_subscribed:
-            channels = self.reload_channels()
-            
-            if not channels:
-                logger.info(f"Нет каналов ОП, пропускаем проверку")
-                return True
-            
-            channels_text = ""
-            for ch in channels:
-                channels_text += f"▪️ <b>{ch['name']}</b>\n"
-            
-            text = (
-                "🌱 <b>Привет! Я могу отслеживать стоки в игре, "
-                "и отправлять их тебе, круто да? 🔥</b>\n\n"
-                "❌ <b>Для использования бота необходимо подписаться на наши каналы:</b>\n\n"
-                f"{channels_text}\n"
-                "<b>После подписки нажми кнопку ниже 👇</b>"
-            )
-            
-            keyboard = []
-            for ch in channels:
-                keyboard.append([InlineKeyboardButton(f"📢 {ch['name']}", url=ch['link'])])
-            keyboard.append([InlineKeyboardButton("✅ Я ПОДПИСАЛСЯ", callback_data="check_subscription")])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            if update.message:
-                logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (message)")
-                await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=reply_markup)
-            elif update.callback_query:
-                logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (callback)")
-                try:
-                    await update.callback_query.edit_message_media(
-                        media=InputMediaPhoto(media=IMAGE_MAIN, caption=text, parse_mode='HTML'),
-                        reply_markup=reply_markup
-                    )
-                except:
-                    await update.callback_query.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=reply_markup)
-            
-            return False
-        
-        logger.info(f"✅ Пользователь {user.id} подписан на все каналы")
-        add_user_to_db(user.id, user.username or user.first_name)
-        return True
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -984,7 +990,7 @@ class GardenHorizonsBot:
         text = (
             "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
             f"👥 <b>Пользователей в боте:</b> {users_count}\n"
-            f"🔐 <b>Каналов ОП:</b> {len(self.required_channels)}\n"
+            f"🔐 <b>Каналов ОП:</b> {len(self.mandatory_channels)}\n"
             f"📢 <b>Каналов для автопостинга:</b> {len(self.posting_channels)}\n\n"
             "<b>Выберите действие:</b>"
         )
@@ -1008,7 +1014,7 @@ class GardenHorizonsBot:
         text = (
             "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
             f"👥 <b>Пользователей в боте:</b> {users_count}\n"
-            f"🔐 <b>Каналов ОП:</b> {len(self.required_channels)}\n"
+            f"🔐 <b>Каналов ОП:</b> {len(self.mandatory_channels)}\n"
             f"📢 <b>Каналов для автопостинга:</b> {len(self.posting_channels)}\n\n"
             "<b>Выберите действие:</b>"
         )
@@ -1023,6 +1029,7 @@ class GardenHorizonsBot:
         
         await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
+    # ========== УПРАВЛЕНИЕ ОП - ИЗ ВАШЕГО ПРИМЕРА ==========
     async def show_op_menu(self, query):
         self.reload_channels()
         
@@ -1053,7 +1060,7 @@ class GardenHorizonsBot:
         
         await query.message.reply_text(
             "📢 <b>Добавление канала в обязательную подписку</b>\n\n"
-            "Отправьте <b>ID канала</b> (например: -1001234567890) или <b>username</b> (@channel):",
+            "Отправьте <b>@username</b> канала или перешлите сообщение:",
             parse_mode='HTML'
         )
         return ADD_OP_CHANNEL_ID
@@ -1091,15 +1098,15 @@ class GardenHorizonsBot:
                 await self.show_admin_panel(update)
                 return ConversationHandler.END
             
-            channel_link = f"https://t.me/{chat.username}" if chat.username else f"https://t.me/c/{str(chat.id).replace('-100', '')}"
-            add_required_channel(str(chat.id), channel_name, channel_link)
+            final_id = f"@{chat.username}" if chat.username else str(chat.id)
+            add_mandatory_channel(final_id, channel_name)
             
             self.reload_channels()
             
             logger.info(f"✅ Канал ОП успешно добавлен и загружен: {channel_name} ({channel_id})")
             await update.message.reply_text(
                 f"✅ <b>Канал {channel_name} добавлен в обязательную подписку!</b>\n"
-                f"📊 Теперь в ОП {len(self.required_channels)} каналов",
+                f"📊 Теперь в ОП {len(self.mandatory_channels)} каналов",
                 parse_mode='HTML'
             )
             
@@ -1113,13 +1120,13 @@ class GardenHorizonsBot:
     async def show_op_remove(self, query):
         self.reload_channels()
         
-        if not self.required_channels:
+        if not self.mandatory_channels:
             await query.message.reply_text("📭 <b>Нет каналов для удаления</b>", parse_mode='HTML')
             return
         
         text = "🗑 <b>Выберите канал для удаления из ОП:</b>"
         keyboard = []
-        for ch in self.required_channels:
+        for ch in self.mandatory_channels:
             keyboard.append([InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"op_del_{ch['id']}")])
         keyboard.append([InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")])
         
@@ -1127,7 +1134,7 @@ class GardenHorizonsBot:
     
     async def delete_op_channel(self, query):
         channel_id = query.data.replace('op_del_', '')
-        remove_required_channel(channel_id)
+        remove_mandatory_channel(channel_id)
         
         self.reload_channels()
         
@@ -1137,11 +1144,11 @@ class GardenHorizonsBot:
     async def show_op_list(self, query):
         self.reload_channels()
         
-        if not self.required_channels:
+        if not self.mandatory_channels:
             text = "📭 <b>Нет каналов в обязательной подписке</b>"
         else:
             text = "<b>📋 КАНАЛЫ ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ (ОП)</b>\n\n"
-            for ch in self.required_channels:
+            for ch in self.mandatory_channels:
                 text += f"• <b>{ch['name']}</b> (ID: <code>{ch['id']}</code>)\n"
         
         keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="admin_op")]]
@@ -1337,7 +1344,11 @@ class GardenHorizonsBot:
         
         for uid in users:
             try:
-                await self.application.bot.send_message(chat_id=uid, text=f"<b>📢 РАССЫЛКА</b>\n\n{text}", parse_mode='HTML')
+                await self.application.bot.send_message(
+                    chat_id=uid,
+                    text=f"<b>📢 РАССЫЛКА</b>\n\n{text}",
+                    parse_mode='HTML'
+                )
                 success += 1
                 await asyncio.sleep(0.05)
             except Exception as e:
@@ -1364,7 +1375,7 @@ class GardenHorizonsBot:
         text = (
             "<b>📊 СТАТИСТИКА БОТА</b>\n\n"
             f"👥 <b>Всего пользователей:</b> {users_count}\n"
-            f"🔐 <b>Каналов ОП:</b> {len(self.required_channels)}\n"
+            f"🔐 <b>Каналов ОП:</b> {len(self.mandatory_channels)}\n"
             f"📢 <b>Каналов для автопостинга:</b> {len(self.posting_channels)}"
         )
         
@@ -1595,10 +1606,11 @@ class GardenHorizonsBot:
             logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
             return
         
-        if query.data == "check_subscription":
-            logger.info(f"✅ Нажата кнопка 'Я ПОДПИСАЛСЯ' пользователем {user.id}")
+        # ИЗМЕНЕНО: теперь используем check_our_sub
+        if query.data == "check_our_sub":
+            logger.info(f"✅ Нажата кнопка 'Я подписался' пользователем {user.id}")
             
-            is_subscribed = await self.check_subscription(user.id)
+            is_subscribed = await self.check_our_subscriptions(user.id)
             
             if is_subscribed:
                 logger.info(f"✅ Пользователь {user.id} подписался на все каналы")
@@ -1609,11 +1621,11 @@ class GardenHorizonsBot:
                 except:
                     pass
                 
-                await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 await self.show_main_menu(query.message)
             else:
                 logger.info(f"❌ Пользователь {user.id} не подписался на все каналы")
-                await query.answer("❌ Вы еще не подписались на все каналы!", show_alert=True)
+                await query.answer("❌ Подпишитесь на все каналы!", show_alert=True)
             return
         
         if query.data == "admin_panel":
@@ -1788,6 +1800,7 @@ class GardenHorizonsBot:
             if gear:
                 parts.append("<b>⚙️ СНАРЯЖЕНИЕ:</b>\n" + "\n".join(gear))
         
+        # ВАЖНО: Добавляем погоду ТОЛЬКО если активна
         if "weather" in data:
             weather_data = data["weather"]
             if is_weather_active(weather_data):
@@ -1873,6 +1886,7 @@ class GardenHorizonsBot:
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
         
+        # ВАЖНО: Добавляем погоду ТОЛЬКО если она активна
         if "weather" in data:
             weather_data = data["weather"]
             if is_weather_active(weather_data):
@@ -1897,6 +1911,7 @@ class GardenHorizonsBot:
         new_type = new_weather.get("type") if new_active else None
         new_end = new_weather.get("endTimestamp") if new_active else None
         
+        # ВАЖНО: Отслеживаем все изменения
         if not old_active and new_active:
             logger.info(f"🌤️ Погода началась: {new_type}")
             return 'started', new_type, new_end
@@ -1907,6 +1922,7 @@ class GardenHorizonsBot:
         
         if old_active and new_active and old_type != new_type:
             logger.info(f"🌤️ Погода изменилась: {old_type} -> {new_type}")
+            # Сначала отправляем что старая закончилась
             return 'ended', old_type, None
         
         return None, None, None
@@ -1930,6 +1946,7 @@ class GardenHorizonsBot:
         
         return user_items
     
+    # ========== ОСНОВНОЙ ЦИКЛ - ИСПРАВЛЕН ==========
     async def monitor_loop(self):
         logger.info("🚀 Запущен цикл мониторинга API")
         
@@ -1941,22 +1958,26 @@ class GardenHorizonsBot:
                 if new_data and self.last_data:
                     weather_info = None
                     weather_type = None
+                    weather_status = None
                     
-                    weather_status, wtype, end_timestamp = self.get_weather_change(self.last_data, new_data)
+                    # Проверяем изменения в погоде
+                    w_status, wtype, end_timestamp = self.get_weather_change(self.last_data, new_data)
                     
-                    if weather_status and wtype:
-                        update_id = f"weather_{weather_status}_{datetime.now().isoformat()}"
+                    if w_status and wtype:
+                        update_id = f"weather_{w_status}_{datetime.now().isoformat()}"
                         
-                        if not was_weather_notification_sent(wtype, weather_status, update_id):
+                        if not was_weather_notification_sent(wtype, w_status, update_id):
+                            weather_status = w_status
                             weather_type = wtype
-                            if weather_status == 'started':
+                            if w_status == 'started':
                                 weather_info = self.format_weather_started_message(wtype, end_timestamp)
                             else:
                                 weather_info = self.format_weather_ended_message(wtype)
                             
-                            logger.info(f"🌤️ Изменение погоды: {weather_status} {wtype}")
-                            mark_weather_notification_sent(wtype, weather_status, update_id)
+                            logger.info(f"🌤️ Изменение погоды: {w_status} {wtype}")
+                            mark_weather_notification_sent(wtype, w_status, update_id)
                     
+                    # Проверяем изменения в стоке
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
                         logger.info(f"✅ Обнаружены изменения в API!")
                         
@@ -1967,12 +1988,12 @@ class GardenHorizonsBot:
                             
                             update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
                             
+                            # ВАЖНО: Отправляем в ОСНОВНОЙ канал
                             main_channel_items = {}
                             for name, qty in all_items.items():
                                 if is_allowed_for_main_channel(name):
                                     main_channel_items[name] = qty
                             
-                            # ИСПРАВЛЕНИЕ 1: ОСНОВНОЙ КАНАЛ
                             if MAIN_CHANNEL_ID and main_channel_items:
                                 for name, qty in main_channel_items.items():
                                     if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty):
@@ -1981,7 +2002,7 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(MAIN_CHANNEL_ID), name, qty)
                                         logger.info(f"📢 В основной канал: {name} = {qty}")
                             
-                            # ИСПРАВЛЕНИЕ 2: АВТОПОСТИНГ
+                            # ВАЖНО: Отправляем во ВСЕ каналы автопостинга
                             for channel in self.posting_channels:
                                 for name, qty in main_channel_items.items():
                                     if not was_item_sent(int(channel['id']), name, qty):
@@ -1990,24 +2011,28 @@ class GardenHorizonsBot:
                                         mark_item_sent(int(channel['id']), name, qty)
                                         logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
                             
-                            # ИСПРАВЛЕНИЕ 3: ПОЛЬЗОВАТЕЛЯМ (ОДНО СООБЩЕНИЕ)
+                            # ВАЖНО: Отправляем пользователям ОДНИМ СООБЩЕНИЕМ
                             users = get_all_users()
                             
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)
-                                if await self.check_subscription(user_id) and settings.notifications_enabled:
+                                if await self.check_our_subscriptions(user_id) and settings.notifications_enabled:
                                     user_items = self.get_user_items_to_send(all_items, settings, user_id, update_id)
                                     
+                                    # Формируем единое сообщение
                                     message_parts = []
                                     
+                                    # Добавляем информацию о погоде если есть и пользователь подписан
                                     if weather_info and weather_type and settings.weather.get(weather_type, ItemSettings()).enabled:
                                         message_parts.append(weather_info)
                                     
+                                    # Добавляем предметы если есть
                                     if user_items:
                                         items_msg = self.format_pm_message(user_items)
                                         if items_msg:
                                             message_parts.append(items_msg)
                                     
+                                    # ВАЖНО: Отправляем одним сообщением
                                     if message_parts:
                                         full_message = "\n\n".join(message_parts)
                                         await self.message_queue.queue.put((user_id, full_message, 'HTML', None))

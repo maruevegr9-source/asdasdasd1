@@ -745,7 +745,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== НОВЫЙ MIDDLEWARE ==========
+# ========== MIDDLEWARE ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -759,30 +759,37 @@ class SubscriptionMiddleware:
         if not user:
             return True
         
-        # Пропускаем админа
+        # ВАЖНО: Всегда пропускаем админа
         if user.id == ADMIN_ID:
+            logger.info(f"👑 Middleware: админ {user.id} пропущен")
             return True
         
-        # Пропускаем callback проверки подписки
-        if update.callback_query and update.callback_query.data == "check_our_sub":
-            return True
-        
-        # Пропускаем команду /start
+        # ВАЖНО: Всегда пропускаем команду /start
         if update.message and update.message.text and update.message.text.startswith('/start'):
+            logger.info(f"🚀 Middleware: команда /start от {user.id} пропущена")
             return True
         
-        # Проверяем подписку
+        # ВАЖНО: Всегда пропускаем callback проверки подписки
+        if update.callback_query and update.callback_query.data == "check_our_sub":
+            logger.info(f"✅ Middleware: callback check_our_sub от {user.id} пропущен")
+            return True
+        
+        # Для всех остальных запросов проверяем подписку
+        logger.info(f"🔍 Middleware: проверка подписки для {user.id}")
+        
+        # Получаем актуальные каналы
         channels = self.bot.reload_channels()
         
         # Если каналов нет - пропускаем
         if not channels:
+            logger.info(f"📭 Middleware: нет каналов ОП, пропускаем {user.id}")
             return True
         
         # Проверяем подписку
         is_subscribed = await self.bot.check_our_subscriptions(user.id)
         
         if not is_subscribed:
-            logger.info(f"🔒 Middleware: пользователь {user.id} не подписан, блокируем действие")
+            logger.info(f"❌ Middleware: пользователь {user.id} не подписан, показываем сообщение")
             
             # Формируем сообщение о необходимости подписки
             text = "📢 Для использования бота необходимо подписаться на каналы 👇\n\n"
@@ -809,29 +816,33 @@ class SubscriptionMiddleware:
             buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_our_sub")])
             
             # Отправляем сообщение
-            if update.message:
-                await update.message.reply_photo(
-                    photo=IMAGE_MAIN,
-                    caption=f"<b>{text}</b>",
-                    parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-                )
-            elif update.callback_query:
-                try:
-                    await update.callback_query.edit_message_media(
-                        media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-                    )
-                except:
-                    await update.callback_query.message.reply_photo(
+            try:
+                if update.message:
+                    await update.message.reply_photo(
                         photo=IMAGE_MAIN,
                         caption=f"<b>{text}</b>",
                         parse_mode='HTML',
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
                     )
+                elif update.callback_query:
+                    try:
+                        await update.callback_query.edit_message_media(
+                            media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                        )
+                    except:
+                        await update.callback_query.message.reply_photo(
+                            photo=IMAGE_MAIN,
+                            caption=f"<b>{text}</b>",
+                            parse_mode='HTML',
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                        )
+            except Exception as e:
+                logger.error(f"❌ Middleware: ошибка отправки сообщения: {e}")
             
             return False  # Блокируем дальнейшую обработку
         
+        logger.info(f"✅ Middleware: пользователь {user.id} подписан, пропускаем")
         return True  # Продолжаем обработку
 
 class GardenHorizonsBot:
@@ -857,12 +868,26 @@ class GardenHorizonsBot:
         self.setup_conversation_handlers()
         self.setup_handlers()
         
-        # Добавляем middleware
+        # Создаем middleware
         self.subscription_middleware = SubscriptionMiddleware(self)
+        
+        # Переопределяем метод process_update
+        self.application.process_update = self.process_update_with_middleware
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
         logger.info(f"📢 Каналов ОП: {len(self.mandatory_channels)}")
         logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
+    
+    async def process_update_with_middleware(self, update: Update):
+        """Обертка для process_update с middleware"""
+        context = ContextTypes.DEFAULT_TYPE(self.application)
+        
+        # Применяем middleware
+        should_continue = await self.subscription_middleware(update, context)
+        
+        if should_continue:
+            # Если middleware пропустил, вызываем оригинальный process_update
+            await self.application._process_update(update)
     
     def reload_channels(self):
         """Перезагружает каналы из БД"""
@@ -934,20 +959,6 @@ class GardenHorizonsBot:
         logger.info(f"✅ Все проверки пройдены для {user_id}")
         return True
     
-    # ========== ОБРАБОТЧИК ВСЕХ ОБНОВЛЕНИЙ С MIDDLEWARE ==========
-    async def handle_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Главный обработчик всех обновлений с middleware"""
-        
-        # Применяем middleware
-        should_continue = await self.subscription_middleware(update, context)
-        
-        if not should_continue:
-            # Middleware заблокировал обработку
-            return
-        
-        # Если middleware пропустил, передаем дальше по цепочке
-        # Здесь ничего не делаем, т.к. обработчики уже зарегистрированы
-    
     def setup_conversation_handlers(self):
         """Создание ConversationHandler"""
         
@@ -1008,20 +1019,6 @@ class GardenHorizonsBot:
         
         # 4. ПОТОМ обработчик сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        
-        # 5. Добавляем middleware через process_update
-        self.application.process_update = self.process_update_with_middleware
-    
-    async def process_update_with_middleware(self, update: Update):
-        """Обертка для process_update с middleware"""
-        context = ContextTypes.DEFAULT_TYPE(self.application)
-        
-        # Применяем middleware
-        should_continue = await self.subscription_middleware(update, context)
-        
-        if should_continue:
-            # Если middleware пропустил, вызываем оригинальный process_update
-            await self.application._process_update(update)
     
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
     
@@ -1049,16 +1046,16 @@ class GardenHorizonsBot:
         user = update.effective_user
         logger.info(f"🚀 Команда /start от пользователя {user.id} (@{user.username})")
         
+        # Добавляем пользователя в БД
         self.user_manager.get_user(user.id, user.username or user.first_name)
         
-        # Проверка подписки теперь в middleware, но для /start показываем меню сразу
+        # Показываем главное меню
         await self.show_main_menu(update)
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         logger.info(f"🚀 Команда /menu от пользователя {user.id}")
         
-        # Проверка подписки в middleware
         await self.show_main_menu(update)
     
     async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

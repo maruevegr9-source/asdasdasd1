@@ -165,7 +165,7 @@ def init_database():
             )
         """)
         
-        # Таблица обязательных каналов (ОП) - ИЗ ТВОЕГО ПРИМЕРА
+        # Таблица обязательных каналов (ОП)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS mandatory_channels (
                 channel_id TEXT PRIMARY KEY,
@@ -356,7 +356,7 @@ def get_users_count() -> int:
         logger.error(f"❌ Ошибка получения количества пользователей: {e}")
         return 0
 
-# ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) - ИЗ ТВОЕГО ПРИМЕРА -----
+# ----- ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ (ОП) -----
 
 def get_mandatory_channels() -> List[Dict]:
     try:
@@ -745,6 +745,95 @@ class MessageQueue:
                 else:
                     raise
 
+# ========== НОВЫЙ MIDDLEWARE ==========
+class SubscriptionMiddleware:
+    """Middleware для проверки подписки на каналы"""
+    
+    def __init__(self, bot_instance):
+        self.bot = bot_instance
+    
+    async def __call__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        
+        # Пропускаем, если нет пользователя
+        if not user:
+            return True
+        
+        # Пропускаем админа
+        if user.id == ADMIN_ID:
+            return True
+        
+        # Пропускаем callback проверки подписки
+        if update.callback_query and update.callback_query.data == "check_our_sub":
+            return True
+        
+        # Пропускаем команду /start
+        if update.message and update.message.text and update.message.text.startswith('/start'):
+            return True
+        
+        # Проверяем подписку
+        channels = self.bot.reload_channels()
+        
+        # Если каналов нет - пропускаем
+        if not channels:
+            return True
+        
+        # Проверяем подписку
+        is_subscribed = await self.bot.check_our_subscriptions(user.id)
+        
+        if not is_subscribed:
+            logger.info(f"🔒 Middleware: пользователь {user.id} не подписан, блокируем действие")
+            
+            # Формируем сообщение о необходимости подписки
+            text = "📢 Для использования бота необходимо подписаться на каналы 👇\n\n"
+            buttons = []
+            
+            for channel in channels:
+                text += f"▪️ {channel['name']}\n"
+                
+                channel_id = channel['id']
+                if channel_id.startswith('@'):
+                    url = f"https://t.me/{channel_id.lstrip('@')}"
+                else:
+                    try:
+                        chat = await self.bot.application.bot.get_chat(int(channel_id))
+                        if chat.username:
+                            url = f"https://t.me/{chat.username}"
+                        else:
+                            url = f"tg://resolve?domain={channel_id}"
+                    except:
+                        url = f"tg://resolve?domain={channel_id}"
+                
+                buttons.append([InlineKeyboardButton(text=f"📢 {channel['name']}", url=url)])
+            
+            buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_our_sub")])
+            
+            # Отправляем сообщение
+            if update.message:
+                await update.message.reply_photo(
+                    photo=IMAGE_MAIN,
+                    caption=f"<b>{text}</b>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                )
+            elif update.callback_query:
+                try:
+                    await update.callback_query.edit_message_media(
+                        media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                    )
+                except:
+                    await update.callback_query.message.reply_photo(
+                        photo=IMAGE_MAIN,
+                        caption=f"<b>{text}</b>",
+                        parse_mode='HTML',
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                    )
+            
+            return False  # Блокируем дальнейшую обработку
+        
+        return True  # Продолжаем обработку
+
 class GardenHorizonsBot:
     def __init__(self, token: str):
         self.token = token
@@ -768,6 +857,9 @@ class GardenHorizonsBot:
         self.setup_conversation_handlers()
         self.setup_handlers()
         
+        # Добавляем middleware
+        self.subscription_middleware = SubscriptionMiddleware(self)
+        
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
         logger.info(f"📢 Каналов ОП: {len(self.mandatory_channels)}")
         logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
@@ -790,9 +882,9 @@ class GardenHorizonsBot:
         
         return self.mandatory_channels
     
-    # ========== ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ - ИЗ ТВОЕГО ПРИМЕРА ==========
+    # ========== ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ==========
     async def get_chat_id_safe(self, identifier):
-        """Безопасное получение ID чата (как в твоем примере)"""
+        """Безопасное получение ID чата"""
         try:
             chat = await self.application.bot.get_chat(identifier)
             return chat.id
@@ -803,8 +895,8 @@ class GardenHorizonsBot:
             return identifier
     
     async def check_our_subscriptions(self, user_id: int) -> bool:
-        """Проверка подписки на наши каналы - КАК В ТВОЕМ ПРИМЕРЕ"""
-        channels = self.reload_channels()
+        """Проверка подписки на каналы"""
+        channels = self.mandatory_channels  # Используем уже загруженные
         
         if not channels:
             logger.info(f"Нет обязательных каналов для пользователя {user_id}")
@@ -842,82 +934,19 @@ class GardenHorizonsBot:
         logger.info(f"✅ Все проверки пройдены для {user_id}")
         return True
     
-    async def require_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        """
-        Проверяет подписку и показывает сообщение с кнопками, если пользователь не подписан
-        Возвращает True, если пользователь подписан или админ
-        """
-        user = update.effective_user
-        settings = self.user_manager.get_user(user.id)
+    # ========== ОБРАБОТЧИК ВСЕХ ОБНОВЛЕНИЙ С MIDDLEWARE ==========
+    async def handle_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Главный обработчик всех обновлений с middleware"""
         
-        if settings.is_admin:
-            logger.info(f"👑 Админ {user.id} пропущен без проверки подписки")
-            return True
+        # Применяем middleware
+        should_continue = await self.subscription_middleware(update, context)
         
-        logger.info(f"🔍 require_subscription для пользователя {user.id}")
-        is_subscribed = await self.check_our_subscriptions(user.id)
+        if not should_continue:
+            # Middleware заблокировал обработку
+            return
         
-        if not is_subscribed:
-            # ВАЖНО: Перезагружаем каналы для отображения актуального списка
-            channels = self.reload_channels()
-            
-            if not channels:
-                logger.info(f"Нет каналов ОП, пропускаем проверку")
-                return True
-            
-            # ИСПРАВЛЕННЫЙ ТЕКСТ - ТЕПЕРЬ ПОКАЗЫВАЕТ НАЗВАНИЯ КАНАЛОВ
-            text = "📢 Для использования бота необходимо подписаться на каналы 👇\n\n"
-            buttons = []
-            
-            for channel in channels:
-                text += f"▪️ {channel['name']}\n"
-                
-                # Формируем ссылку на канал
-                channel_id = channel['id']
-                if channel_id.startswith('@'):
-                    url = f"https://t.me/{channel_id.lstrip('@')}"
-                else:
-                    try:
-                        chat = await self.application.bot.get_chat(int(channel_id))
-                        if chat.username:
-                            url = f"https://t.me/{chat.username}"
-                        else:
-                            url = f"tg://resolve?domain={channel_id}"
-                    except:
-                        url = f"tg://resolve?domain={channel_id}"
-                
-                buttons.append([InlineKeyboardButton(text=f"📢 {channel['name']}", url=url)])
-            
-            buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_our_sub")])
-            
-            if update.message:
-                logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (message)")
-                await update.message.reply_photo(
-                    photo=IMAGE_MAIN, 
-                    caption=f"<b>{text}</b>", 
-                    parse_mode='HTML', 
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-                )
-            elif update.callback_query:
-                logger.info(f"📤 Отправка сообщения о необходимости подписки пользователю {user.id} (callback)")
-                try:
-                    await update.callback_query.edit_message_media(
-                        media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-                    )
-                except:
-                    await update.callback_query.message.reply_photo(
-                        photo=IMAGE_MAIN, 
-                        caption=f"<b>{text}</b>", 
-                        parse_mode='HTML', 
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-                    )
-            
-            return False
-        
-        logger.info(f"✅ Пользователь {user.id} подписан на все каналы")
-        add_user_to_db(user.id, user.username or user.first_name)
-        return True
+        # Если middleware пропустил, передаем дальше по цепочке
+        # Здесь ничего не делаем, т.к. обработчики уже зарегистрированы
     
     def setup_conversation_handlers(self):
         """Создание ConversationHandler"""
@@ -979,6 +1008,20 @@ class GardenHorizonsBot:
         
         # 4. ПОТОМ обработчик сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        
+        # 5. Добавляем middleware через process_update
+        self.application.process_update = self.process_update_with_middleware
+    
+    async def process_update_with_middleware(self, update: Update):
+        """Обертка для process_update с middleware"""
+        context = ContextTypes.DEFAULT_TYPE(self.application)
+        
+        # Применяем middleware
+        should_continue = await self.subscription_middleware(update, context)
+        
+        if should_continue:
+            # Если middleware пропустил, вызываем оригинальный process_update
+            await self.application._process_update(update)
     
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
     
@@ -1008,36 +1051,26 @@ class GardenHorizonsBot:
         
         self.user_manager.get_user(user.id, user.username or user.first_name)
         
-        if not await self.require_subscription(update, context):
-            return
-        
-        reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
-        await update.message.reply_text("🔄 <b>Загружаю меню...</b>", reply_markup=reply_markup, parse_mode='HTML')
+        # Проверка подписки теперь в middleware, но для /start показываем меню сразу
         await self.show_main_menu(update)
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         logger.info(f"🚀 Команда /menu от пользователя {user.id}")
         
-        if not await self.require_subscription(update, context):
-            return
+        # Проверка подписки в middleware
         await self.show_main_menu(update)
     
     async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         logger.info(f"⚙️ Команда /settings от пользователя {user.id}")
         
-        if not await self.require_subscription(update, context):
-            return
         settings = self.user_manager.get_user(user.id)
         await self.show_main_settings(update, settings)
     
     async def cmd_stock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         logger.info(f"📦 Команда /stock от пользователя {user.id}")
-        
-        if not await self.require_subscription(update, context):
-            return
         
         await update.message.reply_html("<b>🔍 Получаю актуальные данные...</b>")
         data = self.fetch_api_data(force=True)
@@ -1055,8 +1088,6 @@ class GardenHorizonsBot:
         user = update.effective_user
         logger.info(f"🔔 Команда /notifications_on от пользователя {user.id}")
         
-        if not await self.require_subscription(update, context):
-            return
         settings = self.user_manager.get_user(user.id)
         settings.notifications_enabled = True
         update_user_setting(user.id, 'notifications_enabled', True)
@@ -1066,8 +1097,6 @@ class GardenHorizonsBot:
         user = update.effective_user
         logger.info(f"🔕 Команда /notifications_off от пользователя {user.id}")
         
-        if not await self.require_subscription(update, context):
-            return
         settings = self.user_manager.get_user(user.id)
         settings.notifications_enabled = False
         update_user_setting(user.id, 'notifications_enabled', False)
@@ -1135,7 +1164,7 @@ class GardenHorizonsBot:
         
         await query.message.reply_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # ========== УПРАВЛЕНИЕ ОП (ИЗ ТВОЕГО ПРИМЕРА) ==========
+    # ========== УПРАВЛЕНИЕ ОП ==========
     
     async def show_op_menu(self, query):
         """Меню управления ОП"""
@@ -1548,8 +1577,12 @@ class GardenHorizonsBot:
             keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
         
         reply_markup_remove = ReplyKeyboardMarkup([[]], resize_keyboard=True)
-        await update.message.reply_text("🔄 <b>Обновляю меню...</b>", reply_markup=reply_markup_remove, parse_mode='HTML')
-        await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        if update.message:
+            await update.message.reply_text("🔄 <b>Обновляю меню...</b>", reply_markup=reply_markup_remove, parse_mode='HTML')
+            await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        elif update.callback_query:
+            await self.show_main_menu_callback(update.callback_query)
     
     async def show_main_menu_callback(self, query):
         """Показ главного меню из callback"""
@@ -1589,7 +1622,11 @@ class GardenHorizonsBot:
             [InlineKeyboardButton("🌤️ ПОГОДА", callback_data="settings_weather"),
              InlineKeyboardButton("🏠 ГЛАВНОЕ МЕНЮ", callback_data="menu_main")]
         ]
-        await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        if update.message:
+            await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        elif update.callback_query:
+            await self.show_main_settings_callback(update.callback_query, settings)
     
     async def show_main_settings_callback(self, query, settings: UserSettings):
         """Показ настроек из callback"""
@@ -1769,7 +1806,7 @@ class GardenHorizonsBot:
             logger.info(f"⏩ Callback {query.data} передан ConversationHandler")
             return
         
-        # ИСПРАВЛЕНО: Обработка проверки подписки
+        # Обработка проверки подписки
         if query.data == "check_our_sub":
             logger.info(f"✅ Нажата кнопка 'Я подписался' пользователем {user.id}")
             
@@ -1785,14 +1822,13 @@ class GardenHorizonsBot:
                 except:
                     pass
                 
-                # ИСПРАВЛЕНО: Сначала показываем подтверждение
+                # Показываем подтверждение
                 await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 
-                # ИСПРАВЛЕНО: Потом отдельным сообщением показываем главное меню
-                await self.show_main_menu(query.message)
+                # Показываем главное меню
+                await self.show_main_menu_callback(query)
             else:
                 logger.info(f"❌ Пользователь {user.id} не подписался на все каналы")
-                # ИСПРАВЛЕНО: Показываем alert с крестиком
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
         
@@ -1872,10 +1908,6 @@ class GardenHorizonsBot:
             if not settings.is_admin:
                 return
             await self.mailing_confirm(update, context)
-            return
-        
-        # Проверка подписки для остальных действий
-        if not await self.require_subscription(update, context):
             return
         
         # Главное меню
@@ -1995,7 +2027,7 @@ class GardenHorizonsBot:
                 end_timestamp = weather_data.get("endTimestamp")
                 
                 if end_timestamp and wtype in TRANSLATIONS:
-                    # ИСПРАВЛЕНИЕ: Конвертируем в московское время
+                    # Конвертируем в московское время
                     msk_time = get_msk_time_from_timestamp(end_timestamp)
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {msk_time} (МСК)")
                 elif wtype in TRANSLATIONS:
@@ -2045,7 +2077,6 @@ class GardenHorizonsBot:
         translated = translate(weather_type)
         if end_timestamp:
             try:
-                # ИСПРАВЛЕНИЕ: Конвертируем в московское время
                 msk_time = get_msk_time_from_timestamp(end_timestamp)
                 return f"<b>🌤️ Началась погода {translated}! Активна до {msk_time} (МСК)</b>"
             except:

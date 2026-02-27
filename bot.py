@@ -1788,8 +1788,24 @@ class GardenHorizonsBot:
                 # ✅ Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
                 await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 
-                # ✅ Отправляем главное меню отдельным сообщением (БЕЗ "Обновляю меню")
-                await self.show_main_menu_callback(query)
+                # ✅ Отправляем главное меню НОВЫМ сообщением (НЕ РЕДАКТИРУЕМ!)
+                text = MAIN_MENU_TEXT
+                keyboard = [
+                    [InlineKeyboardButton("⚙️ АВТО-СТОК", callback_data="menu_settings"),
+                     InlineKeyboardButton("📦 СТОК", callback_data="menu_stock")],
+                    [InlineKeyboardButton("🔔 УВЕДОМЛЕНИЯ ВКЛ", callback_data="notifications_on"),
+                     InlineKeyboardButton("🔕 УВЕДОМЛЕНИЯ ВЫКЛ", callback_data="notifications_off")]
+                ]
+                
+                if settings.is_admin:
+                    keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
+                
+                await query.message.answer_photo(
+                    photo=IMAGE_MAIN,
+                    caption=text,
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
             else:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return

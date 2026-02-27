@@ -479,6 +479,7 @@ def mark_item_sent(chat_id: int, item_name: str, quantity: int, update_id: str):
         )
         conn.commit()
         conn.close()
+        logger.info(f"📝 Отмечено в БД: канал {chat_id}, {item_name}={quantity}, update_id={update_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка отметки отправленного: {e}")
 
@@ -509,6 +510,7 @@ def mark_weather_notification_sent(weather_type: str, status: str, update_id: st
         )
         conn.commit()
         conn.close()
+        logger.info(f"📝 Отмечено уведомление о погоде: {weather_type} - {status}")
     except Exception as e:
         logger.error(f"❌ Ошибка отметки уведомления о погоде: {e}")
 
@@ -936,9 +938,9 @@ class GardenHorizonsBot:
         )
     
     def setup_handlers(self):
-        """Настройка обработчиков - ИСПРАВЛЕННЫЙ ПОРЯДОК"""
+        """Настройка обработчиков - РАЗДЕЛЬНЫЙ ПОРЯДОК"""
         
-        # 1. СНАЧАЛА команды (они не конфликтуют с callback)
+        # 1. СНАЧАЛА команды
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("settings", self.cmd_settings))
         self.application.add_handler(CommandHandler("stock", self.cmd_stock))
@@ -947,18 +949,18 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CommandHandler("admin", self.cmd_admin))
         
-        # 2. ПОТОМ ConversationHandler с УЗКИМИ pattern
+        # 2. ПОТОМ ConversationHandler (они должны быть ПЕРЕД общим CallbackQueryHandler)
         self.application.add_handler(self.add_op_conv)
         self.application.add_handler(self.add_post_conv)
         self.application.add_handler(self.mailing_conv)
         
-        # 3. ПОТОМ ВСЕ остальные callback'и
-        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        # 3. ПОТОМ обработчик пользовательских callback'ов (БЕЗ pattern)
+        self.application.add_handler(CallbackQueryHandler(self.handle_user_callback))
         
         # 4. ПОТОМ обработчик сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         
-        logger.info("✅ Обработчики зарегистрированы в правильном порядке")
+        logger.info("✅ Обработчики зарегистрированы")
     
     # ========== ФУНКЦИИ ОТМЕНЫ ==========
     
@@ -1637,29 +1639,17 @@ class GardenHorizonsBot:
             update_user_setting(settings.user_id, f"weather_{weather_name}", enabled)
             await self.show_weather_settings(query, settings)
     
-    # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
+    # ========== НОВЫЙ ОБРАБОТЧИК ПОЛЬЗОВАТЕЛЬСКИХ CALLBACK ==========
     
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        text = update.message.text
-        
-        if any(key in context.user_data for key in ['op_channel_id', 'post_channel_id', 'mailing_text']):
-            return
-        
-        if text == "🏠 ГЛАВНОЕ МЕНЮ":
-            reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
-            await update.message.reply_text("🔄 <b>Возвращаюсь в главное меню...</b>", reply_markup=reply_markup, parse_mode='HTML')
-            await self.show_main_menu(update)
-    
-    # ========== ГЛАВНЫЙ ОБРАБОТЧИК CALLBACK ==========
-    
-    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Главный обработчик callback запросов"""
+    async def handle_user_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик ТОЛЬКО пользовательских кнопок (меню, настройки и т.д.)"""
         query = update.callback_query
         user = update.effective_user
         
         # СРАЗУ отвечаем, чтобы убрать "часики"
         await query.answer()
+        
+        logger.info(f"🔘 Пользовательский callback: {query.data} от {user.id}")
         
         # Получаем настройки пользователя
         settings = self.user_manager.get_user(user.id)
@@ -1716,6 +1706,7 @@ class GardenHorizonsBot:
         
         # ===== АДМИН-КНОПКИ =====
         if not settings.is_admin:
+            logger.warning(f"⚠️ Неизвестный callback от не-админа: {query.data}")
             return
         
         if query.data == "admin_panel":
@@ -1778,6 +1769,22 @@ class GardenHorizonsBot:
             else:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
+        
+        logger.warning(f"⚠️ Неизвестный callback: {query.data}")
+    
+    # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
+    
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        text = update.message.text
+        
+        if any(key in context.user_data for key in ['op_channel_id', 'post_channel_id', 'mailing_text']):
+            return
+        
+        if text == "🏠 ГЛАВНОЕ МЕНЮ":
+            reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
+            await update.message.reply_text("🔄 <b>Возвращаюсь в главное меню...</b>", reply_markup=reply_markup, parse_mode='HTML')
+            await self.show_main_menu(update)
     
     # ========== РАБОТА С API ==========
     
@@ -1903,12 +1910,14 @@ class GardenHorizonsBot:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
+                    logger.info(f"📦 Найден предмет из API: {name} = {item['quantity']}")
         
         if "gear" in data:
             for item in data["gear"]:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
+                    logger.info(f"🔧 Найден предмет из API: {name} = {item['quantity']}")
         
         if "weather" in data:
             weather_data = data["weather"]
@@ -1916,7 +1925,9 @@ class GardenHorizonsBot:
                 wtype = weather_data.get("type")
                 if wtype and wtype in TRANSLATIONS:
                     all_items[wtype] = 1
+                    logger.info(f"🌤️ Активная погода: {wtype}")
         
+        logger.info(f"📊 Всего предметов из API: {len(all_items)}")
         return all_items
     
     def get_weather_change(self, old_data: Dict, new_data: Dict) -> tuple:
@@ -2006,7 +2017,9 @@ class GardenHorizonsBot:
                     # Проверяем изменения в стоке
                     if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate") or weather_changed:
                         if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate"):
-                            logger.info(f"✅ Обнаружены изменения в API!")
+                            logger.info(f"✅ Обнаружены изменения в API! Новый update_id: {new_data.get('lastGlobalUpdate')}")
+                        else:
+                            logger.info(f"✅ Обнаружены изменения в погоде!")
                         
                         all_items = self.get_all_current_items(new_data)
                         
@@ -2019,14 +2032,19 @@ class GardenHorizonsBot:
                                 if is_allowed_for_main_channel(name):
                                     main_channel_items[name] = qty
                             
+                            logger.info(f"📊 Предметов для каналов: {len(main_channel_items)}")
+                            
                             # 1. Отправляем в ОСНОВНОЙ канал
                             if MAIN_CHANNEL_ID and main_channel_items:
                                 for name, qty in main_channel_items.items():
+                                    # Проверяем, отправлялось ли ЭТО КОНКРЕТНОЕ обновление
                                     if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id):
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
                                         mark_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id)
-                                        logger.info(f"📢 В основной канал: {name} = {qty}")
+                                        logger.info(f"📢 В основной канал: {name} = {qty} (update_id: {update_id})")
+                                    else:
+                                        logger.info(f"⏭️ Пропуск дубликата в основном канале: {name} = {qty} уже отправлено для update_id: {update_id}")
                             
                             # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
                             for channel in self.posting_channels:
@@ -2034,8 +2052,10 @@ class GardenHorizonsBot:
                                 try:
                                     bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
                                     if bot_member.status not in ['administrator', 'creator']:
+                                        logger.warning(f"⚠️ Бот не админ в канале {channel['name']}, пропускаю")
                                         continue
-                                except:
+                                except Exception as e:
+                                    logger.error(f"❌ Ошибка проверки прав в канале {channel['name']}: {e}")
                                     continue
                                 
                                 for name, qty in main_channel_items.items():
@@ -2043,10 +2063,13 @@ class GardenHorizonsBot:
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
                                         mark_item_sent(int(channel['id']), name, qty, update_id)
-                                        logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
+                                        logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty} (update_id: {update_id})")
+                                    else:
+                                        logger.info(f"⏭️ Пропуск дубликата в канале {channel['name']}: {name} = {qty} уже отправлено")
                             
                             # 3. Отправляем пользователям (личные сообщения)
                             users = get_all_users()
+                            logger.info(f"👥 Отправка пользователям: {len(users)}")
                             
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)
@@ -2081,7 +2104,7 @@ class GardenHorizonsBot:
                 await asyncio.sleep(sleep_time)
                 
             except Exception as e:
-                logger.error(f"❌ Ошибка в цикле: {e}")
+                logger.error(f"❌ Ошибка в цикле: {e}", exc_info=True)
                 await asyncio.sleep(UPDATE_INTERVAL)
     
     async def run(self):

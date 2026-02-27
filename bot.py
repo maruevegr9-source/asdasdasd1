@@ -886,9 +886,10 @@ class GardenHorizonsBot:
             logger.info(f"⚡ Middleware решение: should_continue={should_continue}")
             
             if should_continue:
-                logger.info(f"⚡ Передаю управление в _process_update")
-                await self.application._process_update(update)
-                logger.info(f"⚡ Управление возвращено из _process_update")
+                logger.info(f"⚡ Передаю управление в process_update")
+                # !!! ИСПРАВЛЕНО: используем process_update вместо _process_update !!!
+                await self.application.process_update(update)
+                logger.info(f"⚡ Управление возвращено из process_update")
             else:
                 logger.info(f"⚡ Middleware заблокировал обработку")
                 

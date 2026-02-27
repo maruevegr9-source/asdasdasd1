@@ -34,7 +34,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 
-API_URL = os.getenv("API_URL", "https://garden-horizons-stock.dawidfc.workers.dev/api/stock")
+# ИСПРАВЛЕНО: новый URL API
+API_URL = os.getenv("API_URL", "https://stock.gardenhorizonswiki.com/stock.json")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))
 ADMIN_ID = 8025951500
 
@@ -1788,7 +1789,7 @@ class GardenHorizonsBot:
                 # ✅ Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
                 await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 
-                # ✅ Отправляем главное меню НОВЫМ сообщением (ИСПРАВЛЕНО: answer_photo -> reply_photo)
+                # ✅ Отправляем главное меню НОВЫМ сообщением
                 text = MAIN_MENU_TEXT
                 keyboard = [
                     [InlineKeyboardButton("⚙️ АВТО-СТОК", callback_data="menu_settings"),

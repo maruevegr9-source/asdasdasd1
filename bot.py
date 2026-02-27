@@ -735,7 +735,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE ==========
+# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE (БЕЗ БЛОКИРОВКИ CALLBACK) ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -753,9 +753,7 @@ class SubscriptionMiddleware:
             logger.info(f"📨 Middleware: ПОЛУЧЕНО СООБЩЕНИЕ от {user.id}: {update.message.text}")
         if update.callback_query:
             logger.info(f"📨 Middleware: ПОЛУЧЕН CALLBACK от {user.id}: {update.callback_query.data}")
-            # ВАЖНО: Все callback'и пропускаем без проверки подписки
-            logger.info(f"✅ Middleware: callback {update.callback_query.data} от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
-            return True
+            # Логируем, но НЕ БЛОКИРУЕМ - просто идем дальше
         
         # Для команды /start - ВСЕГДА пропускаем
         if update.message and update.message.text and update.message.text.startswith('/start'):
@@ -768,6 +766,7 @@ class SubscriptionMiddleware:
             return True
         
         # ДЛЯ ВСЕХ ОСТАЛЬНЫХ СООБЩЕНИЙ - ПРОВЕРЯЕМ ПОДПИСКУ
+        # (callback'и мы уже пропустили выше)
         logger.info(f"🔍 Middleware: проверяю подписку для {user.id}")
         
         # Получаем актуальные каналы

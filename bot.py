@@ -735,7 +735,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== MIDDLEWARE ==========
+# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -753,15 +753,13 @@ class SubscriptionMiddleware:
             logger.info(f"📨 Middleware: ПОЛУЧЕНО СООБЩЕНИЕ от {user.id}: {update.message.text}")
         if update.callback_query:
             logger.info(f"📨 Middleware: ПОЛУЧЕН CALLBACK от {user.id}: {update.callback_query.data}")
+            # ВАЖНО: Все callback'и пропускаем без проверки подписки
+            logger.info(f"✅ Middleware: callback {update.callback_query.data} от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
+            return True
         
         # Для команды /start - ВСЕГДА пропускаем
         if update.message and update.message.text and update.message.text.startswith('/start'):
             logger.info(f"🚀 Middleware: команда /start от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
-            return True
-        
-        # Пропускаем callback проверки подписки
-        if update.callback_query and update.callback_query.data == "check_our_sub":
-            logger.info(f"✅ Middleware: callback check_our_sub от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
         # Пропускаем админа
@@ -769,7 +767,7 @@ class SubscriptionMiddleware:
             logger.info(f"👑 Middleware: админ {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
-        # ДЛЯ ВСЕХ ОСТАЛЬНЫХ - ПРОВЕРЯЕМ ПОДПИСКУ
+        # ДЛЯ ВСЕХ ОСТАЛЬНЫХ СООБЩЕНИЙ - ПРОВЕРЯЕМ ПОДПИСКУ
         logger.info(f"🔍 Middleware: проверяю подписку для {user.id}")
         
         # Получаем актуальные каналы
@@ -1502,11 +1500,9 @@ class GardenHorizonsBot:
         reply_markup_remove = ReplyKeyboardMarkup([[]], resize_keyboard=True)
         
         if update.message:
-            # Для обычного сообщения - показываем "Обновляю меню"
             await update.message.reply_text("🔄 <b>Обновляю меню...</b>", reply_markup=reply_markup_remove, parse_mode='HTML')
             await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         elif update.callback_query:
-            # Для callback - просто показываем меню без лишних сообщений
             await self.show_main_menu_callback(update.callback_query)
     
     async def show_main_menu_callback(self, query):

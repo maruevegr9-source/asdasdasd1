@@ -735,7 +735,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== MIDDLEWARE С РАБОЧЕЙ ПРОВЕРКОЙ ПОДПИСКИ ==========
+# ========== MIDDLEWARE ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -754,28 +754,28 @@ class SubscriptionMiddleware:
         if update.callback_query:
             logger.info(f"📨 Middleware: ПОЛУЧЕН CALLBACK от {user.id}: {update.callback_query.data}")
         
-        # ===== ВАЖНО: Для команды /start - ВСЕГДА пропускаем =====
+        # Для команды /start - ВСЕГДА пропускаем
         if update.message and update.message.text and update.message.text.startswith('/start'):
             logger.info(f"🚀 Middleware: команда /start от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
-        # ===== ВАЖНО: Пропускаем callback проверки подписки =====
+        # Пропускаем callback проверки подписки
         if update.callback_query and update.callback_query.data == "check_our_sub":
             logger.info(f"✅ Middleware: callback check_our_sub от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
-        # ===== ВАЖНО: Пропускаем админа =====
+        # Пропускаем админа
         if user.id == ADMIN_ID:
             logger.info(f"👑 Middleware: админ {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
-        # ===== ДЛЯ ВСЕХ ОСТАЛЬНЫХ - ПРОВЕРЯЕМ ПОДПИСКУ =====
+        # ДЛЯ ВСЕХ ОСТАЛЬНЫХ - ПРОВЕРЯЕМ ПОДПИСКУ
         logger.info(f"🔍 Middleware: проверяю подписку для {user.id}")
         
         # Получаем актуальные каналы
         channels = self.bot.reload_channels()
         
-        # Если каналов нет - пропускаем (считаем что подписка не требуется)
+        # Если каналов нет - пропускаем
         if not channels:
             logger.info(f"📭 Middleware: нет каналов ОП, пропускаю {user.id}")
             return True
@@ -786,7 +786,6 @@ class SubscriptionMiddleware:
         if not is_subscribed:
             logger.info(f"❌ Middleware: пользователь {user.id} НЕ ПОДПИСАН, показываю сообщение")
             
-            # Формируем сообщение о необходимости подписки
             text = "📢 Для использования бота необходимо подписаться на каналы 👇\n\n"
             buttons = []
             
@@ -810,7 +809,6 @@ class SubscriptionMiddleware:
             
             buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_our_sub")])
             
-            # Отправляем сообщение
             try:
                 if update.message:
                     await update.message.reply_photo(
@@ -835,10 +833,10 @@ class SubscriptionMiddleware:
             except Exception as e:
                 logger.error(f"❌ Middleware: ошибка отправки сообщения: {e}")
             
-            return False  # Блокируем дальнейшую обработку
+            return False
         
         logger.info(f"✅ Middleware: пользователь {user.id} подписан, пропускаю")
-        return True  # Продолжаем обработку
+        return True
 
 class GardenHorizonsBot:
     def __init__(self, token: str):
@@ -896,7 +894,6 @@ class GardenHorizonsBot:
             
             if should_continue:
                 logger.info(f"⚡ Передаю управление в original_process_update")
-                # Вызываем СОХРАНЁННЫЙ оригинальный метод, а не себя!
                 await self.original_process_update(update)
                 logger.info(f"⚡ Управление возвращено из original_process_update")
             else:
@@ -1834,6 +1831,7 @@ class GardenHorizonsBot:
             await self.mailing_confirm(update, context)
             return
         
+        # ===== ВАЖНО: Исправленная обработка check_our_sub =====
         if query.data == "check_our_sub":
             logger.info(f"✅ Обработка check_our_sub для {user.id}")
             is_subscribed = await self.check_our_subscriptions(user.id)
@@ -1841,13 +1839,29 @@ class GardenHorizonsBot:
             if is_subscribed:
                 add_user_to_db(user.id, user.username or user.first_name)
                 
+                # Удаляем сообщение с кнопками
                 try:
                     await query.message.delete()
                 except:
                     pass
                 
+                # Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
                 await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
-                await self.show_main_menu_callback(query)
+                
+                # Отправляем главное меню отдельным сообщением
+                # Создаем фейковый update для show_main_menu
+                class FakeMessage:
+                    def __init__(self, chat):
+                        self.chat = chat
+                
+                class FakeUpdate:
+                    def __init__(self, chat, user):
+                        self.effective_user = user
+                        self.message = FakeMessage(chat)
+                        self.callback_query = None
+                
+                fake_update = FakeUpdate(query.message.chat, user)
+                await self.show_main_menu(fake_update)
             else:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
@@ -1996,12 +2010,14 @@ class GardenHorizonsBot:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
+                    logger.info(f"📦 Найден предмет из API: {name} = {item['quantity']}")
         
         if "gear" in data:
             for item in data["gear"]:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
+                    logger.info(f"🔧 Найден предмет из API: {name} = {item['quantity']}")
         
         if "weather" in data:
             weather_data = data["weather"]
@@ -2009,7 +2025,9 @@ class GardenHorizonsBot:
                 wtype = weather_data.get("type")
                 if wtype and wtype in TRANSLATIONS:
                     all_items[wtype] = 1
+                    logger.info(f"🌤️ Активная погода: {wtype}")
         
+        logger.info(f"📊 Всего предметов из API: {len(all_items)}")
         return all_items
     
     def get_weather_change(self, old_data: Dict, new_data: Dict) -> tuple:
@@ -2069,6 +2087,39 @@ class GardenHorizonsBot:
     async def monitor_loop(self):
         logger.info("🚀 Запущен цикл мониторинга API")
         
+        # ===== ТЕСТОВАЯ ДИАГНОСТИКА КАНАЛОВ ПРИ ЗАПУСКЕ =====
+        try:
+            logger.info("🧪 ТЕСТ: проверка отправки во все каналы")
+            
+            # Проверяем основной канал
+            if MAIN_CHANNEL_ID:
+                try:
+                    bot_member = await self.application.bot.get_chat_member(int(MAIN_CHANNEL_ID), self.application.bot.id)
+                    logger.info(f"🧪 Основной канал: статус бота = {bot_member.status}")
+                    if bot_member.status in ['administrator', 'creator']:
+                        logger.info(f"🧪 ✅ Основной канал: бот админ")
+                    else:
+                        logger.warning(f"🧪 ❌ Основной канал: бот НЕ админ! Статус: {bot_member.status}")
+                except Exception as e:
+                    logger.error(f"🧪 ❌ Основной канал: ошибка проверки - {e}")
+            
+            # Проверяем каналы автопостинга
+            logger.info(f"🧪 Каналов автопостинга: {len(self.posting_channels)}")
+            for i, channel in enumerate(self.posting_channels):
+                try:
+                    bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
+                    logger.info(f"🧪 Канал {i+1}: {channel['name']} - статус бота = {bot_member.status}")
+                    if bot_member.status in ['administrator', 'creator']:
+                        logger.info(f"🧪   ✅ Бот админ")
+                    else:
+                        logger.warning(f"🧪   ❌ Бот НЕ админ! Статус: {bot_member.status}")
+                except Exception as e:
+                    logger.error(f"🧪   ❌ Ошибка проверки: {e}")
+            
+            logger.info("🧪 ТЕСТОВАЯ ДИАГНОСТИКА ЗАВЕРШЕНА")
+        except Exception as e:
+            logger.error(f"🧪 Ошибка при диагностике: {e}")
+        
         while True:
             try:
                 start_time = datetime.now()
@@ -2114,22 +2165,37 @@ class GardenHorizonsBot:
                                 if is_allowed_for_main_channel(name):
                                     main_channel_items[name] = qty
                             
+                            logger.info(f"📊 Предметов для каналов: {len(main_channel_items)}")
+                            
                             # 1. Отправляем в ОСНОВНОЙ канал
                             if MAIN_CHANNEL_ID and main_channel_items:
+                                logger.info(f"📢 НАЧАЛО отправки в ОСНОВНОЙ канал")
                                 for name, qty in main_channel_items.items():
                                     if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id):
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
                                         mark_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id)
                                         logger.info(f"📢 В основной канал: {name} = {qty} (update_id: {update_id})")
+                                    else:
+                                        logger.info(f"⏭️ Пропуск дубликата в основном канале: {name} = {qty}")
                             
                             # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
+                            logger.info(f"📢 НАЧАЛО отправки в каналы автопостинга. Всего каналов: {len(self.posting_channels)}")
                             for channel in self.posting_channels:
+                                logger.info(f"🔍 Обрабатываю канал: {channel['name']} (ID: {channel['id']})")
+                                
                                 try:
                                     bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
+                                    logger.info(f"   Статус бота в канале: {bot_member.status}")
+                                    
                                     if bot_member.status not in ['administrator', 'creator']:
+                                        logger.warning(f"   ⚠️ Бот НЕ администратор в канале {channel['name']}, ПРОПУСКАЮ")
                                         continue
-                                except:
+                                    else:
+                                        logger.info(f"   ✅ Бот администратор в канале {channel['name']}, отправляю")
+                                        
+                                except Exception as e:
+                                    logger.error(f"   ❌ Ошибка проверки прав в канале {channel['name']}: {e}")
                                     continue
                                 
                                 for name, qty in main_channel_items.items():
@@ -2137,10 +2203,13 @@ class GardenHorizonsBot:
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
                                         mark_item_sent(int(channel['id']), name, qty, update_id)
-                                        logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
+                                        logger.info(f"   📢 В канал автопостинга {channel['name']}: {name} = {qty}")
+                                    else:
+                                        logger.info(f"   ⏭️ Предмет {name} = {qty} уже отправлен в канал {channel['name']}")
                             
                             # 3. Отправляем пользователям (личные сообщения)
                             users = get_all_users()
+                            logger.info(f"👥 Отправка пользователям: {len(users)}")
                             
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)

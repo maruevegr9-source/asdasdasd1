@@ -735,7 +735,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== ИСПРАВЛЕННЫЙ MIDDLEWARE ==========
+# ========== MIDDLEWARE ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -1786,9 +1786,9 @@ class GardenHorizonsBot:
                     pass
                 
                 # ✅ Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
-                await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 
-                # ✅ Отправляем главное меню НОВЫМ сообщением (НЕ РЕДАКТИРУЕМ!)
+                # ✅ Отправляем главное меню НОВЫМ сообщением (ИСПРАВЛЕНО: answer_photo -> reply_photo)
                 text = MAIN_MENU_TEXT
                 keyboard = [
                     [InlineKeyboardButton("⚙️ АВТО-СТОК", callback_data="menu_settings"),
@@ -1800,7 +1800,7 @@ class GardenHorizonsBot:
                 if settings.is_admin:
                     keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
                 
-                await query.message.answer_photo(
+                await query.message.reply_photo(
                     photo=IMAGE_MAIN,
                     caption=text,
                     parse_mode='HTML',

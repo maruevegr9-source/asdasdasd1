@@ -1502,9 +1502,11 @@ class GardenHorizonsBot:
         reply_markup_remove = ReplyKeyboardMarkup([[]], resize_keyboard=True)
         
         if update.message:
+            # Для обычного сообщения - показываем "Обновляю меню"
             await update.message.reply_text("🔄 <b>Обновляю меню...</b>", reply_markup=reply_markup_remove, parse_mode='HTML')
             await update.message.reply_photo(photo=IMAGE_MAIN, caption=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         elif update.callback_query:
+            # Для callback - просто показываем меню без лишних сообщений
             await self.show_main_menu_callback(update.callback_query)
     
     async def show_main_menu_callback(self, query):
@@ -1785,11 +1787,24 @@ class GardenHorizonsBot:
                 except:
                     pass
                 
-                # Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
+                # ✅ Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
                 await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 
-                # Отправляем главное меню отдельным сообщением
-                await self.show_main_menu_callback(query)
+                # ✅ Отправляем главное меню отдельным сообщением (без "Обновляю меню")
+                # Создаем фейковый update для show_main_menu
+                class FakeMessage:
+                    def __init__(self, chat):
+                        self.chat = chat
+                        self.from_user = user  # Добавляем from_user
+                
+                class FakeUpdate:
+                    def __init__(self, chat, user):
+                        self.effective_user = user
+                        self.message = FakeMessage(chat)
+                        self.callback_query = None
+                
+                fake_update = FakeUpdate(query.message.chat, user)
+                await self.show_main_menu(fake_update)
             else:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
@@ -2077,36 +2092,41 @@ class GardenHorizonsBot:
         
         # ===== ТЕСТОВАЯ ДИАГНОСТИКА КАНАЛОВ ПРИ ЗАПУСКЕ =====
         try:
-            logger.info("🧪 ТЕСТ: проверка отправки во все каналы")
+            logger.info("🔍========== ДИАГНОСТИКА КАНАЛОВ ==========")
             
             # Проверяем основной канал
             if MAIN_CHANNEL_ID:
                 try:
+                    chat = await self.application.bot.get_chat(int(MAIN_CHANNEL_ID))
                     bot_member = await self.application.bot.get_chat_member(int(MAIN_CHANNEL_ID), self.application.bot.id)
-                    logger.info(f"🧪 Основной канал: статус бота = {bot_member.status}")
+                    logger.info(f"📢 Основной канал: {chat.title} (ID: {MAIN_CHANNEL_ID})")
+                    logger.info(f"   Статус бота: {bot_member.status}")
                     if bot_member.status in ['administrator', 'creator']:
-                        logger.info(f"🧪 ✅ Основной канал: бот админ")
+                        logger.info(f"   ✅ Бот админ в основном канале")
                     else:
-                        logger.warning(f"🧪 ❌ Основной канал: бот НЕ админ! Статус: {bot_member.status}")
+                        logger.error(f"   ❌ БОТ НЕ АДМИН В ОСНОВНОМ КАНАЛЕ! Статус: {bot_member.status}")
                 except Exception as e:
-                    logger.error(f"🧪 ❌ Основной канал: ошибка проверки - {e}")
+                    logger.error(f"❌ Ошибка проверки основного канала: {e}")
             
             # Проверяем каналы автопостинга
-            logger.info(f"🧪 Каналов автопостинга: {len(self.posting_channels)}")
+            logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
             for i, channel in enumerate(self.posting_channels):
                 try:
+                    chat = await self.application.bot.get_chat(int(channel['id']))
                     bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
-                    logger.info(f"🧪 Канал {i+1}: {channel['name']} - статус бота = {bot_member.status}")
+                    logger.info(f"📢 Канал {i+1}: {channel['name']} (ID: {channel['id']})")
+                    logger.info(f"   Название: {chat.title}")
+                    logger.info(f"   Статус бота: {bot_member.status}")
                     if bot_member.status in ['administrator', 'creator']:
-                        logger.info(f"🧪   ✅ Бот админ")
+                        logger.info(f"   ✅ Бот админ")
                     else:
-                        logger.warning(f"🧪   ❌ Бот НЕ админ! Статус: {bot_member.status}")
+                        logger.warning(f"   ⚠️ БОТ НЕ АДМИН! Уведомления в этот канал отправляться НЕ БУДУТ")
                 except Exception as e:
-                    logger.error(f"🧪   ❌ Ошибка проверки: {e}")
+                    logger.error(f"❌ Ошибка проверки канала {channel['name']}: {e}")
             
-            logger.info("🧪 ТЕСТОВАЯ ДИАГНОСТИКА ЗАВЕРШЕНА")
+            logger.info("🔍========== ДИАГНОСТИКА ЗАВЕРШЕНА ==========")
         except Exception as e:
-            logger.error(f"🧪 Ошибка при диагностике: {e}")
+            logger.error(f"❌ Ошибка при диагностике: {e}")
         
         while True:
             try:
@@ -2159,13 +2179,14 @@ class GardenHorizonsBot:
                             if MAIN_CHANNEL_ID and main_channel_items:
                                 logger.info(f"📢 НАЧАЛО отправки в ОСНОВНОЙ канал")
                                 for name, qty in main_channel_items.items():
+                                    logger.info(f"🔍 Проверка дубликата: {name}={qty}, update_id={update_id}")
                                     if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id):
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
                                         mark_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id)
                                         logger.info(f"📢 В основной канал: {name} = {qty} (update_id: {update_id})")
                                     else:
-                                        logger.info(f"⏭️ Пропуск дубликата в основном канале: {name} = {qty}")
+                                        logger.info(f"⏭️ Предмет {name} = {qty} уже отправлен для update_id={update_id}")
                             
                             # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
                             logger.info(f"📢 НАЧАЛО отправки в каналы автопостинга. Всего каналов: {len(self.posting_channels)}")

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, InputMediaPhoto, ChatMember
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from telegram.constants import ParseMode
-from telegram.error import RetryAfter, TimedOut
+from telegram.error import RetryAfter, TimedOut, Forbidden
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -700,6 +700,9 @@ class MessageQueue:
                     await asyncio.sleep(2 ** attempt)
                 else:
                     raise
+            except Forbidden as e:
+                logger.warning(f"⚠️ Не могу отправить сообщение в {chat_id}: {e}")
+                return  # Просто пропускаем, не ретраим
             except Exception as e:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
@@ -723,6 +726,9 @@ class MessageQueue:
                     await asyncio.sleep(2 ** attempt)
                 else:
                     raise
+            except Forbidden as e:
+                logger.warning(f"⚠️ Не могу отправить фото в {chat_id}: {e}")
+                return
             except Exception as e:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
@@ -742,27 +748,39 @@ class SubscriptionMiddleware:
         if not user:
             return True
         
-        # Для команды /start - просто пропускаем, не блокируем
+        # Логируем ВСЁ, что приходит
+        if update.message:
+            logger.info(f"📨 Middleware: ПОЛУЧЕНО СООБЩЕНИЕ от {user.id}: {update.message.text}")
+        if update.callback_query:
+            logger.info(f"📨 Middleware: ПОЛУЧЕН CALLBACK от {user.id}: {update.callback_query.data}")
+        
+        # Для команды /start - ВСЕГДА пропускаем
         if update.message and update.message.text and update.message.text.startswith('/start'):
+            logger.info(f"🚀 Middleware: команда /start от {user.id} - ПРОПУСКАЮ")
             return True
         
         # Пропускаем callback проверки подписки
         if update.callback_query and update.callback_query.data == "check_our_sub":
+            logger.info(f"✅ Middleware: callback check_our_sub от {user.id} - ПРОПУСКАЮ")
             return True
         
         # Пропускаем админа
         if user.id == ADMIN_ID:
+            logger.info(f"👑 Middleware: админ {user.id} - ПРОПУСКАЮ")
             return True
         
         # Проверяем подписку для остальных
         channels = self.bot.reload_channels()
         
         if not channels:
+            logger.info(f"📭 Middleware: нет каналов ОП, пропускаю {user.id}")
             return True
         
         is_subscribed = await self.bot.check_our_subscriptions(user.id)
         
         if not is_subscribed:
+            logger.info(f"❌ Middleware: пользователь {user.id} НЕ ПОДПИСАН, показываю сообщение")
+            
             text = "📢 Для использования бота необходимо подписаться на каналы 👇\n\n"
             buttons = []
             
@@ -786,29 +804,33 @@ class SubscriptionMiddleware:
             
             buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_our_sub")])
             
-            if update.message:
-                await update.message.reply_photo(
-                    photo=IMAGE_MAIN,
-                    caption=f"<b>{text}</b>",
-                    parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-                )
-            elif update.callback_query:
-                try:
-                    await update.callback_query.edit_message_media(
-                        media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-                    )
-                except:
-                    await update.callback_query.message.reply_photo(
+            try:
+                if update.message:
+                    await update.message.reply_photo(
                         photo=IMAGE_MAIN,
                         caption=f"<b>{text}</b>",
                         parse_mode='HTML',
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
                     )
+                elif update.callback_query:
+                    try:
+                        await update.callback_query.edit_message_media(
+                            media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                        )
+                    except:
+                        await update.callback_query.message.reply_photo(
+                            photo=IMAGE_MAIN,
+                            caption=f"<b>{text}</b>",
+                            parse_mode='HTML',
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                        )
+            except Exception as e:
+                logger.error(f"❌ Middleware: ошибка отправки сообщения: {e}")
             
             return False
         
+        logger.info(f"✅ Middleware: пользователь {user.id} подписан, пропускаю")
         return True
 
 class GardenHorizonsBot:
@@ -837,21 +859,41 @@ class GardenHorizonsBot:
         # Создаем middleware
         self.subscription_middleware = SubscriptionMiddleware(self)
         
-        # Переопределяем метод process_update
+        # Переопределяем метод process_update с проверкой
         self.application.process_update = self.process_update_with_middleware
+        logger.info("✅ process_update переопределен на process_update_with_middleware")
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
         logger.info(f"📢 Каналов ОП: {len(self.mandatory_channels)}")
         logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
     
     async def process_update_with_middleware(self, update: Update):
-        """Обертка для process_update с middleware"""
-        context = ContextTypes.DEFAULT_TYPE(self.application)
+        """Обертка для process_update с middleware - УСИЛЕННОЕ ЛОГИРОВАНИЕ"""
+        logger.info(f"⚡⚡⚡ process_update_with_middleware ВЫЗВАН для update_id: {update.update_id}")
         
-        should_continue = await self.subscription_middleware(update, context)
+        # Если есть сообщение
+        if update.message:
+            logger.info(f"⚡ Входящее сообщение: {update.message.text} от {update.effective_user.id}")
+        # Если есть callback
+        if update.callback_query:
+            logger.info(f"⚡ Входящий callback: {update.callback_query.data} от {update.effective_user.id}")
         
-        if should_continue:
-            await self.application._process_update(update)
+        try:
+            context = ContextTypes.DEFAULT_TYPE(self.application)
+            
+            # Применяем middleware
+            should_continue = await self.subscription_middleware(update, context)
+            logger.info(f"⚡ Middleware решение: should_continue={should_continue}")
+            
+            if should_continue:
+                logger.info(f"⚡ Передаю управление в _process_update")
+                await self.application._process_update(update)
+                logger.info(f"⚡ Управление возвращено из _process_update")
+            else:
+                logger.info(f"⚡ Middleware заблокировал обработку")
+                
+        except Exception as e:
+            logger.error(f"⚡ КРИТИЧЕСКАЯ ОШИБКА в process_update_with_middleware: {e}", exc_info=True)
     
     def reload_channels(self):
         """Перезагружает каналы из БД"""
@@ -949,12 +991,12 @@ class GardenHorizonsBot:
         self.application.add_handler(CommandHandler("menu", self.cmd_menu))
         self.application.add_handler(CommandHandler("admin", self.cmd_admin))
         
-        # 2. ПОТОМ ConversationHandler (они должны быть ПЕРЕД общим CallbackQueryHandler)
+        # 2. ПОТОМ ConversationHandler
         self.application.add_handler(self.add_op_conv)
         self.application.add_handler(self.add_post_conv)
         self.application.add_handler(self.mailing_conv)
         
-        # 3. ПОТОМ обработчик пользовательских callback'ов (БЕЗ pattern)
+        # 3. ПОТОМ обработчик пользовательских callback'ов
         self.application.add_handler(CallbackQueryHandler(self.handle_user_callback))
         
         # 4. ПОТОМ обработчик сообщений
@@ -983,6 +1025,7 @@ class GardenHorizonsBot:
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        logger.info(f"🚀🚀🚀 cmd_start ВЫЗВАН для {user.id}")
         self.user_manager.get_user(user.id, user.username or user.first_name)
         await self.show_main_menu(update)
     
@@ -1393,6 +1436,9 @@ class GardenHorizonsBot:
                 )
                 success += 1
                 await asyncio.sleep(0.05)
+            except Forbidden as e:
+                failed += 1
+                logger.warning(f"⚠️ Пользователь {uid} заблокировал бота, пропускаем")
             except Exception as e:
                 failed += 1
                 logger.error(f"❌ Ошибка отправки пользователю {uid}: {e}")
@@ -1431,6 +1477,7 @@ class GardenHorizonsBot:
     async def show_main_menu(self, update: Update):
         """Показ главного меню"""
         user = update.effective_user
+        logger.info(f"🌱🌱🌱 show_main_menu вызван для {user.id}")
         settings = self.user_manager.get_user(user.id)
         
         text = MAIN_MENU_TEXT
@@ -1456,6 +1503,7 @@ class GardenHorizonsBot:
     async def show_main_menu_callback(self, query):
         """Показ главного меню из callback"""
         user = query.from_user
+        logger.info(f"🌱 show_main_menu_callback вызван для {user.id}")
         settings = self.user_manager.get_user(user.id)
         
         text = MAIN_MENU_TEXT
@@ -1587,6 +1635,7 @@ class GardenHorizonsBot:
     
     async def show_stock_callback(self, query):
         """Показ текущего стока"""
+        logger.info(f"📦 show_stock_callback вызван для {query.from_user.id}")
         try:
             await query.edit_message_media(
                 media=InputMediaPhoto(media=IMAGE_MAIN, caption="<b>🔍 Получаю данные...</b>", parse_mode='HTML')
@@ -1649,58 +1698,69 @@ class GardenHorizonsBot:
         # СРАЗУ отвечаем, чтобы убрать "часики"
         await query.answer()
         
-        logger.info(f"🔘 Пользовательский callback: {query.data} от {user.id}")
+        logger.info(f"🔘🔘🔘 handle_user_callback ВЫЗВАН: {query.data} от {user.id}")
         
         # Получаем настройки пользователя
         settings = self.user_manager.get_user(user.id)
         
         # ===== ПРЯМАЯ ОБРАБОТКА ВСЕХ КНОПОК =====
         if query.data == "menu_stock":
+            logger.info("📦 Обработка menu_stock")
             await self.show_stock_callback(query)
             return
         
         if query.data == "menu_main":
+            logger.info("🏠 Обработка menu_main")
             await self.show_main_menu_callback(query)
             return
         
         if query.data == "menu_settings":
+            logger.info("⚙️ Обработка menu_settings")
             await self.show_main_settings_callback(query, settings)
             return
         
         if query.data == "notifications_on":
+            logger.info("🔔 Обработка notifications_on")
             settings.notifications_enabled = True
             update_user_setting(user.id, 'notifications_enabled', True)
             await query.message.reply_html("<b>✅ Уведомления включены!</b>")
             return
         
         if query.data == "notifications_off":
+            logger.info("🔕 Обработка notifications_off")
             settings.notifications_enabled = False
             update_user_setting(user.id, 'notifications_enabled', False)
             await query.message.reply_html("<b>❌ Уведомления выключены</b>")
             return
         
         if query.data == "settings_seeds":
+            logger.info("🌱 Обработка settings_seeds")
             await self.show_seeds_settings(query, settings)
             return
         
         if query.data == "settings_gear":
+            logger.info("⚙️ Обработка settings_gear")
             await self.show_gear_settings(query, settings)
             return
         
         if query.data == "settings_weather":
+            logger.info("🌤️ Обработка settings_weather")
             await self.show_weather_settings(query, settings)
             return
         
         # ===== ОБРАБОТКА ТОГГЛОВ =====
         if query.data.startswith("seed_toggle_"):
+            logger.info(f"🌱 Обработка seed_toggle: {query.data}")
             await self.handle_seed_callback(query, settings)
             return
         
         if query.data.startswith("gear_toggle_"):
+            logger.info(f"⚙️ Обработка gear_toggle: {query.data}")
             await self.handle_gear_callback(query, settings)
             return
         
         if query.data.startswith("weather_toggle_"):
+            logger.info(f"🌤️ Обработка weather_toggle: {query.data}")
             await self.handle_weather_callback(query, settings)
             return
         
@@ -1710,50 +1770,62 @@ class GardenHorizonsBot:
             return
         
         if query.data == "admin_panel":
+            logger.info("👑 Обработка admin_panel")
             await self.show_admin_panel_callback(query)
             return
         
         if query.data == "admin_op":
+            logger.info("🔐 Обработка admin_op")
             await self.show_op_menu(query)
             return
         
         if query.data == "op_remove":
+            logger.info("🗑 Обработка op_remove")
             await self.show_op_remove(query)
             return
         
         if query.data == "op_list":
+            logger.info("📋 Обработка op_list")
             await self.show_op_list(query)
             return
         
         if query.data.startswith("op_del_"):
+            logger.info(f"❌ Обработка op_del: {query.data}")
             await self.delete_op_channel(query)
             return
         
         if query.data == "admin_post":
+            logger.info("📢 Обработка admin_post")
             await self.show_post_menu(query)
             return
         
         if query.data == "post_remove":
+            logger.info("🗑 Обработка post_remove")
             await self.show_post_remove(query)
             return
         
         if query.data == "post_list":
+            logger.info("📋 Обработка post_list")
             await self.show_post_list(query)
             return
         
         if query.data.startswith("post_del_"):
+            logger.info(f"❌ Обработка post_del: {query.data}")
             await self.delete_post_channel(query)
             return
         
         if query.data == "admin_stats":
+            logger.info("📊 Обработка admin_stats")
             await self.show_stats(query)
             return
         
         if query.data in ["mailing_yes", "mailing_no"]:
+            logger.info(f"📧 Обработка mailing: {query.data}")
             await self.mailing_confirm(update, context)
             return
         
         if query.data == "check_our_sub":
+            logger.info(f"✅ Обработка check_our_sub для {user.id}")
             is_subscribed = await self.check_our_subscriptions(user.id)
             
             if is_subscribed:
@@ -1778,10 +1850,14 @@ class GardenHorizonsBot:
         user = update.effective_user
         text = update.message.text
         
+        logger.info(f"📨 handle_message вызван для {user.id}: {text}")
+        
         if any(key in context.user_data for key in ['op_channel_id', 'post_channel_id', 'mailing_text']):
+            logger.info(f"⏩ Пользователь {user.id} в диалоге, пропускаю")
             return
         
         if text == "🏠 ГЛАВНОЕ МЕНЮ":
+            logger.info(f"🏠 Возврат в главное меню пользователем {user.id}")
             reply_markup = ReplyKeyboardMarkup([[]], resize_keyboard=True)
             await update.message.reply_text("🔄 <b>Возвращаюсь в главное меню...</b>", reply_markup=reply_markup, parse_mode='HTML')
             await self.show_main_menu(update)
@@ -1910,14 +1986,12 @@ class GardenHorizonsBot:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
-                    logger.info(f"📦 Найден предмет из API: {name} = {item['quantity']}")
         
         if "gear" in data:
             for item in data["gear"]:
                 name = item["name"]
                 if name in TRANSLATIONS and item["quantity"] > 0:
                     all_items[name] = item["quantity"]
-                    logger.info(f"🔧 Найден предмет из API: {name} = {item['quantity']}")
         
         if "weather" in data:
             weather_data = data["weather"]
@@ -1925,9 +1999,7 @@ class GardenHorizonsBot:
                 wtype = weather_data.get("type")
                 if wtype and wtype in TRANSLATIONS:
                     all_items[wtype] = 1
-                    logger.info(f"🌤️ Активная погода: {wtype}")
         
-        logger.info(f"📊 Всего предметов из API: {len(all_items)}")
         return all_items
     
     def get_weather_change(self, old_data: Dict, new_data: Dict) -> tuple:
@@ -2032,30 +2104,22 @@ class GardenHorizonsBot:
                                 if is_allowed_for_main_channel(name):
                                     main_channel_items[name] = qty
                             
-                            logger.info(f"📊 Предметов для каналов: {len(main_channel_items)}")
-                            
                             # 1. Отправляем в ОСНОВНОЙ канал
                             if MAIN_CHANNEL_ID and main_channel_items:
                                 for name, qty in main_channel_items.items():
-                                    # Проверяем, отправлялось ли ЭТО КОНКРЕТНОЕ обновление
                                     if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id):
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
                                         mark_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id)
                                         logger.info(f"📢 В основной канал: {name} = {qty} (update_id: {update_id})")
-                                    else:
-                                        logger.info(f"⏭️ Пропуск дубликата в основном канале: {name} = {qty} уже отправлено для update_id: {update_id}")
                             
                             # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
                             for channel in self.posting_channels:
-                                # Пропускаем каналы, где бот не админ
                                 try:
                                     bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
                                     if bot_member.status not in ['administrator', 'creator']:
-                                        logger.warning(f"⚠️ Бот не админ в канале {channel['name']}, пропускаю")
                                         continue
-                                except Exception as e:
-                                    logger.error(f"❌ Ошибка проверки прав в канале {channel['name']}: {e}")
+                                except:
                                     continue
                                 
                                 for name, qty in main_channel_items.items():
@@ -2063,13 +2127,10 @@ class GardenHorizonsBot:
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
                                         mark_item_sent(int(channel['id']), name, qty, update_id)
-                                        logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty} (update_id: {update_id})")
-                                    else:
-                                        logger.info(f"⏭️ Пропуск дубликата в канале {channel['name']}: {name} = {qty} уже отправлено")
+                                        logger.info(f"📢 В канал автопостинга {channel['name']}: {name} = {qty}")
                             
                             # 3. Отправляем пользователям (личные сообщения)
                             users = get_all_users()
-                            logger.info(f"👥 Отправка пользователям: {len(users)}")
                             
                             for user_id in users:
                                 settings = self.user_manager.get_user(user_id)

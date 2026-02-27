@@ -34,7 +34,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 
-# ИСПРАВЛЕНО: новый URL API
+# Новый API
 API_URL = os.getenv("API_URL", "https://stock.gardenhorizonswiki.com/stock.json")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))
 ADMIN_ID = 8025951500
@@ -233,6 +233,79 @@ def init_database():
 
 db_initialized = init_database()
 
+# ========== МИГРАЦИЯ БАЗЫ ДАННЫХ (ДОБАВЛЕНИЕ update_id) ==========
+try:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    
+    # Проверяем таблицу sent_items
+    cur.execute("PRAGMA table_info(sent_items)")
+    columns = [column[1] for column in cur.fetchall()]
+    logger.info(f"📊 Структура таблицы sent_items: {columns}")
+    
+    if 'update_id' not in columns:
+        logger.warning("⚠️ Таблица sent_items не содержит колонку update_id. Запускаю миграцию...")
+        
+        # Создаем временную таблицу с правильной структурой
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sent_items_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                item_name TEXT,
+                quantity INTEGER,
+                update_id TEXT,
+                sent_at TEXT,
+                UNIQUE(chat_id, item_name, quantity, update_id)
+            )
+        """)
+        
+        # Копируем данные из старой таблицы (если она существует)
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sent_items'")
+        if cur.fetchone():
+            try:
+                # Проверяем, какие колонки есть в старой таблице
+                cur.execute("PRAGMA table_info(sent_items)")
+                old_columns = [col[1] for col in cur.fetchall()]
+                logger.info(f"📊 Старая структура sent_items: {old_columns}")
+                
+                if 'update_id' in old_columns:
+                    logger.info("✅ Колонка update_id уже существует в sent_items")
+                else:
+                    # Копируем данные без update_id
+                    cur.execute("""
+                        INSERT INTO sent_items_new (id, chat_id, item_name, quantity, sent_at)
+                        SELECT id, chat_id, item_name, quantity, sent_at FROM sent_items
+                    """)
+                    logger.info(f"📋 Скопировано {cur.rowcount} записей из sent_items")
+                    
+                    # Удаляем старую таблицу
+                    cur.execute("DROP TABLE sent_items")
+                    logger.info("🗑 Старая таблица sent_items удалена")
+                    
+                    # Переименовываем новую
+                    cur.execute("ALTER TABLE sent_items_new RENAME TO sent_items")
+                    logger.info("✅ Новая таблица sent_items создана и переименована")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при копировании данных: {e}")
+        else:
+            # Если таблицы нет, просто переименовываем новую
+            cur.execute("ALTER TABLE sent_items_new RENAME TO sent_items")
+            logger.info("✅ Новая таблица sent_items создана")
+        
+        conn.commit()
+        logger.info("✅ Миграция таблицы sent_items завершена")
+    else:
+        logger.info("✅ Таблица sent_items уже имеет правильную структуру (есть колонка update_id)")
+    
+    # Проверяем результат
+    cur.execute("PRAGMA table_info(sent_items)")
+    final_columns = [column[1] for column in cur.fetchall()]
+    logger.info(f"📊 Финальная структура sent_items: {final_columns}")
+    
+    conn.close()
+except Exception as e:
+    logger.error(f"❌ Критическая ошибка при миграции БД: {e}", exc_info=True)
+
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ==========
 
 def get_db():
@@ -357,6 +430,9 @@ def get_mandatory_channels() -> List[Dict]:
         cur.execute("SELECT channel_id, channel_name FROM mandatory_channels ORDER BY channel_id")
         channels = [{'id': row[0], 'name': row[1]} for row in cur.fetchall()]
         conn.close()
+        logger.info(f"📥 get_mandatory_channels: загружено {len(channels)} каналов ОП")
+        for ch in channels:
+            logger.info(f"   - {ch['name']} ({ch['id']})")
         return channels
     except Exception as e:
         logger.error(f"❌ Ошибка получения каналов ОП: {e}")
@@ -366,12 +442,32 @@ def add_mandatory_channel(channel_id: str, channel_name: str):
     try:
         conn = get_db()
         cur = conn.cursor()
+        logger.info(f"📝 Добавление канала ОП в БД: {channel_name} ({channel_id})")
+        
+        # Проверяем, есть ли уже такой канал
+        cur.execute("SELECT COUNT(*) FROM mandatory_channels WHERE channel_id = ?", (str(channel_id),))
+        exists = cur.fetchone()[0] > 0
+        if exists:
+            logger.info(f"⚠️ Канал {channel_name} уже существует в БД, обновляем название")
+        
         cur.execute(
             "INSERT OR REPLACE INTO mandatory_channels (channel_id, channel_name) VALUES (?, ?)",
             (str(channel_id), channel_name)
         )
         conn.commit()
+        
+        # Проверяем, что добавилось
+        cur.execute("SELECT COUNT(*) FROM mandatory_channels WHERE channel_id = ?", (str(channel_id),))
+        count = cur.fetchone()[0]
+        logger.info(f"✅ Проверка: канал {'найден' if count > 0 else 'НЕ НАЙДЕН'} в БД после добавления")
+        
         conn.close()
+        logger.info(f"✅ Канал ОП добавлен в БД: {channel_name} ({channel_id})")
+        
+        # Дополнительная проверка - сразу читаем все каналы
+        all_channels = get_mandatory_channels()
+        logger.info(f"📊 После добавления в БД всего каналов ОП: {len(all_channels)}")
+        
     except Exception as e:
         logger.error(f"❌ Ошибка добавления канала ОП в БД: {e}")
 
@@ -379,9 +475,11 @@ def remove_mandatory_channel(channel_id: str):
     try:
         conn = get_db()
         cur = conn.cursor()
+        logger.info(f"🗑 Удаление канала из БД: {channel_id}")
         cur.execute("DELETE FROM mandatory_channels WHERE channel_id = ?", (str(channel_id),))
         conn.commit()
         conn.close()
+        logger.info(f"✅ Канал ОП удален из БД: {channel_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка удаления канала ОП из БД: {e}")
 
@@ -397,6 +495,7 @@ def get_posting_channels() -> List[Dict]:
             for row in cur.fetchall()
         ]
         conn.close()
+        logger.info(f"📥 get_posting_channels: загружено {len(channels)} каналов")
         return channels
     except Exception as e:
         logger.error(f"❌ Ошибка получения каналов автопостинга: {e}")
@@ -412,6 +511,7 @@ def add_posting_channel(channel_id: str, name: str, username: str = None):
         )
         conn.commit()
         conn.close()
+        logger.info(f"✅ Канал автопостинга добавлен в БД: {name} ({channel_id})")
     except Exception as e:
         logger.error(f"❌ Ошибка добавления канала автопостинга в БД: {e}")
 
@@ -422,6 +522,7 @@ def remove_posting_channel(channel_id: str):
         cur.execute("DELETE FROM posting_channels WHERE channel_id = ?", (str(channel_id),))
         conn.commit()
         conn.close()
+        logger.info(f"✅ Канал автопостинга удален из БД: {channel_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка удаления канала автопостинга из БД: {e}")
 
@@ -465,6 +566,7 @@ def was_item_sent(chat_id: int, item_name: str, quantity: int, update_id: str) -
         )
         count = cur.fetchone()[0]
         conn.close()
+        logger.info(f"🔍 Проверка дубликата: канал {chat_id}, {item_name}={quantity}, update_id={update_id} -> {'найден' if count > 0 else 'новый'}")
         return count > 0
     except Exception as e:
         logger.error(f"❌ Ошибка проверки отправленного: {e}")
@@ -904,9 +1006,24 @@ class GardenHorizonsBot:
             logger.error(f"⚡ КРИТИЧЕСКАЯ ОШИБКА в process_update_with_middleware: {e}", exc_info=True)
     
     def reload_channels(self):
-        """Перезагружает каналы из БД"""
+        """Перезагружает каналы из БД - УЛУЧШЕННАЯ ДИАГНОСТИКА"""
+        logger.info("🔄========== reload_channels ВЫЗВАНА ==========")
+        old_op_count = len(self.mandatory_channels)
+        old_post_count = len(self.posting_channels)
+        
         self.mandatory_channels = get_mandatory_channels()
         self.posting_channels = get_posting_channels()
+        
+        logger.info(f"📊 Результат: ОП: {old_op_count} -> {len(self.mandatory_channels)}, Постинг: {old_post_count} -> {len(self.posting_channels)}")
+        
+        if self.mandatory_channels:
+            logger.info(f"📋 Список каналов ОП ({len(self.mandatory_channels)}):")
+            for i, ch in enumerate(self.mandatory_channels):
+                logger.info(f"   {i+1}. {ch['name']} (ID: {ch['id']})")
+        else:
+            logger.warning("⚠️ reload_channels: список каналов ОП ПУСТ!")
+        
+        logger.info("🔄========== reload_channels ЗАВЕРШЕНА ==========")
         return self.mandatory_channels
     
     # ========== ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ==========
@@ -926,27 +1043,39 @@ class GardenHorizonsBot:
         channels = self.mandatory_channels
         
         if not channels:
+            logger.info(f"check_our_subscriptions: нет каналов для пользователя {user_id}")
             return True
+        
+        logger.info(f"🔍 Проверка подписки для {user_id} на {len(channels)} каналов")
         
         for channel in channels:
             channel_id_str = channel['id']
+            channel_name = channel['name']
+            
+            logger.info(f"   Проверка канала: {channel_name} ({channel_id_str})")
             
             try:
                 chat_id = await self.get_chat_id_safe(channel_id_str)
                 
                 if chat_id is None:
+                    logger.error(f"      ❌ Не удалось получить chat_id")
                     return False
                 
                 member = await self.application.bot.get_chat_member(chat_id, user_id)
                 status = member.status
+                logger.info(f"      Статус: {status}")
                 
                 if status not in ["member", "administrator", "creator", "restricted"]:
+                    logger.info(f"      ❌ Не подписан")
                     return False
+                else:
+                    logger.info(f"      ✅ Подписан")
                     
             except Exception as e:
-                logger.error(f"❌ Ошибка проверки подписки: {e}")
+                logger.error(f"      ❌ Ошибка проверки: {e}")
                 return False
         
+        logger.info(f"✅ Все проверки пройдены для {user_id}")
         return True
     
     def setup_conversation_handlers(self):
@@ -1182,6 +1311,8 @@ class GardenHorizonsBot:
         channel_name = update.message.text.strip()
         channel_id = context.user_data.get('op_channel_id')
         
+        logger.info(f"➕ Попытка добавления канала ОП: {channel_name} ({channel_id})")
+        
         try:
             if channel_id.startswith('@'):
                 chat = await self.application.bot.get_chat(channel_id)
@@ -1199,16 +1330,25 @@ class GardenHorizonsBot:
                 return ConversationHandler.END
             
             final_id = f"@{chat.username}" if chat.username else str(chat.id)
+            logger.info(f"✅ Канал найден, финальный ID: {final_id}")
+            
             add_mandatory_channel(final_id, channel_name)
             
+            # Принудительно перезагружаем каналы
             self.reload_channels()
             
+            # Проверяем, что канал действительно добавился
+            all_channels = get_mandatory_channels()
+            logger.info(f"📊 После добавления в БД всего каналов ОП: {len(all_channels)}")
+            
             await update.message.reply_text(
-                f"✅ <b>Канал {channel_name} добавлен в обязательную подписку!</b>",
+                f"✅ <b>Канал {channel_name} добавлен в обязательную подписку!</b>\n"
+                f"📊 Теперь в ОП {len(self.mandatory_channels)} каналов",
                 parse_mode='HTML'
             )
             
         except Exception as e:
+            logger.error(f"❌ Ошибка добавления канала ОП: {e}")
             await update.message.reply_text(f"❌ <b>Ошибка:</b> {e}", parse_mode='HTML')
         
         await self.show_admin_panel(update)

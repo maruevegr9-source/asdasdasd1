@@ -702,7 +702,7 @@ class MessageQueue:
                     raise
             except Forbidden as e:
                 logger.warning(f"⚠️ Не могу отправить сообщение в {chat_id}: {e}")
-                return  # Просто пропускаем, не ретраим
+                return
             except Exception as e:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
@@ -859,16 +859,18 @@ class GardenHorizonsBot:
         # Создаем middleware
         self.subscription_middleware = SubscriptionMiddleware(self)
         
-        # Переопределяем метод process_update с проверкой
+        # Сохраняем оригинальный метод process_update
+        self.original_process_update = self.application.process_update
+        # Переопределяем на наш
         self.application.process_update = self.process_update_with_middleware
-        logger.info("✅ process_update переопределен на process_update_with_middleware")
+        logger.info("✅ process_update переопределен на process_update_with_middleware, оригинал сохранён")
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
         logger.info(f"📢 Каналов ОП: {len(self.mandatory_channels)}")
         logger.info(f"📢 Каналов автопостинга: {len(self.posting_channels)}")
     
     async def process_update_with_middleware(self, update: Update):
-        """Обертка для process_update с middleware - УСИЛЕННОЕ ЛОГИРОВАНИЕ"""
+        """Обертка для process_update с middleware - ИСПРАВЛЕНО (без рекурсии)"""
         logger.info(f"⚡⚡⚡ process_update_with_middleware ВЫЗВАН для update_id: {update.update_id}")
         
         # Если есть сообщение
@@ -886,10 +888,10 @@ class GardenHorizonsBot:
             logger.info(f"⚡ Middleware решение: should_continue={should_continue}")
             
             if should_continue:
-                logger.info(f"⚡ Передаю управление в process_update")
-                # !!! ИСПРАВЛЕНО: используем process_update вместо _process_update !!!
-                await self.application.process_update(update)
-                logger.info(f"⚡ Управление возвращено из process_update")
+                logger.info(f"⚡ Передаю управление в original_process_update")
+                # Вызываем СОХРАНЁННЫЙ оригинальный метод, а не себя!
+                await self.original_process_update(update)
+                logger.info(f"⚡ Управление возвращено из original_process_update")
             else:
                 logger.info(f"⚡ Middleware заблокировал обработку")
                 

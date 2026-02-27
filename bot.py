@@ -1771,7 +1771,30 @@ class GardenHorizonsBot:
             await self.handle_weather_callback(query, settings)
             return
         
-        # ===== АДМИН-КНОПКИ =====
+        # ===== ВАЖНО: check_our_sub ДО проверки на админа =====
+        if query.data == "check_our_sub":
+            logger.info(f"✅ Обработка check_our_sub для {user.id}")
+            is_subscribed = await self.check_our_subscriptions(user.id)
+            
+            if is_subscribed:
+                add_user_to_db(user.id, user.username or user.first_name)
+                
+                # Удаляем сообщение с кнопками
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+                
+                # Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
+                await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
+                
+                # Отправляем главное меню отдельным сообщением
+                await self.show_main_menu_callback(query)
+            else:
+                await query.answer("❌ Подписка не подтверждена!", show_alert=True)
+            return
+        
+        # ===== АДМИН-КНОПКИ ===== (ЭТО ДОЛЖНО БЫТЬ ПОСЛЕ)
         if not settings.is_admin:
             logger.warning(f"⚠️ Неизвестный callback от не-админа: {query.data}")
             return
@@ -1829,41 +1852,6 @@ class GardenHorizonsBot:
         if query.data in ["mailing_yes", "mailing_no"]:
             logger.info(f"📧 Обработка mailing: {query.data}")
             await self.mailing_confirm(update, context)
-            return
-        
-        # ===== ВАЖНО: Исправленная обработка check_our_sub =====
-        if query.data == "check_our_sub":
-            logger.info(f"✅ Обработка check_our_sub для {user.id}")
-            is_subscribed = await self.check_our_subscriptions(user.id)
-            
-            if is_subscribed:
-                add_user_to_db(user.id, user.username or user.first_name)
-                
-                # Удаляем сообщение с кнопками
-                try:
-                    await query.message.delete()
-                except:
-                    pass
-                
-                # Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
-                await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
-                
-                # Отправляем главное меню отдельным сообщением
-                # Создаем фейковый update для show_main_menu
-                class FakeMessage:
-                    def __init__(self, chat):
-                        self.chat = chat
-                
-                class FakeUpdate:
-                    def __init__(self, chat, user):
-                        self.effective_user = user
-                        self.message = FakeMessage(chat)
-                        self.callback_query = None
-                
-                fake_update = FakeUpdate(query.message.chat, user)
-                await self.show_main_menu(fake_update)
-            else:
-                await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
         
         logger.warning(f"⚠️ Неизвестный callback: {query.data}")

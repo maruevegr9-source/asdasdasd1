@@ -735,7 +735,7 @@ class MessageQueue:
                 else:
                     raise
 
-# ========== MIDDLEWARE ==========
+# ========== MIDDLEWARE С РАБОЧЕЙ ПРОВЕРКОЙ ПОДПИСКИ ==========
 class SubscriptionMiddleware:
     """Middleware для проверки подписки на каналы"""
     
@@ -754,33 +754,39 @@ class SubscriptionMiddleware:
         if update.callback_query:
             logger.info(f"📨 Middleware: ПОЛУЧЕН CALLBACK от {user.id}: {update.callback_query.data}")
         
-        # Для команды /start - ВСЕГДА пропускаем
+        # ===== ВАЖНО: Для команды /start - ВСЕГДА пропускаем =====
         if update.message and update.message.text and update.message.text.startswith('/start'):
-            logger.info(f"🚀 Middleware: команда /start от {user.id} - ПРОПУСКАЮ")
+            logger.info(f"🚀 Middleware: команда /start от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
-        # Пропускаем callback проверки подписки
+        # ===== ВАЖНО: Пропускаем callback проверки подписки =====
         if update.callback_query and update.callback_query.data == "check_our_sub":
-            logger.info(f"✅ Middleware: callback check_our_sub от {user.id} - ПРОПУСКАЮ")
+            logger.info(f"✅ Middleware: callback check_our_sub от {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
-        # Пропускаем админа
+        # ===== ВАЖНО: Пропускаем админа =====
         if user.id == ADMIN_ID:
-            logger.info(f"👑 Middleware: админ {user.id} - ПРОПУСКАЮ")
+            logger.info(f"👑 Middleware: админ {user.id} - ПРОПУСКАЮ БЕЗ ПРОВЕРКИ")
             return True
         
-        # Проверяем подписку для остальных
+        # ===== ДЛЯ ВСЕХ ОСТАЛЬНЫХ - ПРОВЕРЯЕМ ПОДПИСКУ =====
+        logger.info(f"🔍 Middleware: проверяю подписку для {user.id}")
+        
+        # Получаем актуальные каналы
         channels = self.bot.reload_channels()
         
+        # Если каналов нет - пропускаем (считаем что подписка не требуется)
         if not channels:
             logger.info(f"📭 Middleware: нет каналов ОП, пропускаю {user.id}")
             return True
         
+        # Проверяем подписку
         is_subscribed = await self.bot.check_our_subscriptions(user.id)
         
         if not is_subscribed:
             logger.info(f"❌ Middleware: пользователь {user.id} НЕ ПОДПИСАН, показываю сообщение")
             
+            # Формируем сообщение о необходимости подписки
             text = "📢 Для использования бота необходимо подписаться на каналы 👇\n\n"
             buttons = []
             
@@ -804,6 +810,7 @@ class SubscriptionMiddleware:
             
             buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_our_sub")])
             
+            # Отправляем сообщение
             try:
                 if update.message:
                     await update.message.reply_photo(
@@ -828,10 +835,10 @@ class SubscriptionMiddleware:
             except Exception as e:
                 logger.error(f"❌ Middleware: ошибка отправки сообщения: {e}")
             
-            return False
+            return False  # Блокируем дальнейшую обработку
         
         logger.info(f"✅ Middleware: пользователь {user.id} подписан, пропускаю")
-        return True
+        return True  # Продолжаем обработку
 
 class GardenHorizonsBot:
     def __init__(self, token: str):

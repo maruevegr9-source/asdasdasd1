@@ -1790,21 +1790,8 @@ class GardenHorizonsBot:
                 # ✅ Отправляем подтверждение ОТДЕЛЬНЫМ сообщением
                 await query.message.answer("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 
-                # ✅ Отправляем главное меню отдельным сообщением (без "Обновляю меню")
-                # Создаем фейковый update для show_main_menu
-                class FakeMessage:
-                    def __init__(self, chat):
-                        self.chat = chat
-                        self.from_user = user  # Добавляем from_user
-                
-                class FakeUpdate:
-                    def __init__(self, chat, user):
-                        self.effective_user = user
-                        self.message = FakeMessage(chat)
-                        self.callback_query = None
-                
-                fake_update = FakeUpdate(query.message.chat, user)
-                await self.show_main_menu(fake_update)
+                # ✅ Отправляем главное меню отдельным сообщением (БЕЗ "Обновляю меню")
+                await self.show_main_menu_callback(query)
             else:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return

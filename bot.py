@@ -19,9 +19,9 @@ from telegram.error import RetryAfter, TimedOut, Forbidden
 load_dotenv()
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
-# ОПТИМИЗАЦИЯ: убираем лишние логи для скорости
+# Включаем подробные логи для диагностики
 logging.basicConfig(
-    level=logging.WARNING,  # Только ошибки и предупреждения
+    level=logging.INFO,  # Временно ставим INFO для диагностики
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('bot.log', encoding='utf-8'),
@@ -29,7 +29,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-logging.getLogger('telegram').setLevel(logging.WARNING)  # Без логов телеграма
+logging.getLogger('telegram').setLevel(logging.WARNING)
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -149,7 +149,7 @@ def get_db():
     conn.execute("PRAGMA journal_mode=WAL")
     # ОПТИМИЗАЦИЯ: увеличиваем кэш
     conn.execute("PRAGMA cache_size=-20000")  # 20MB кэша
-    # ОПТИМИЗАЦИЯ: оптимизируем синхронизацию (без отключения)
+    # ОПТИМИЗАЦИЯ: оптимизируем синхронизацию
     conn.execute("PRAGMA synchronous=NORMAL")
     # ОПТИМИЗАЦИЯ: храним временные таблицы в памяти
     conn.execute("PRAGMA temp_store=MEMORY")
@@ -849,8 +849,8 @@ class MessageQueue:
                 parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
-        except:
-            pass  # Игнорируем ошибки для скорости
+        except Exception as e:
+            logger.error(f"Ошибка отправки в {chat_id}: {e}")
     
     async def _send_fast(self, chat_id: int, photo: str, caption: str, parse_mode: str):
         """Быстрая отправка фото"""
@@ -861,8 +861,8 @@ class MessageQueue:
                 caption=caption,
                 parse_mode=parse_mode
             )
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото в {chat_id}: {e}")
 
 # ========== MIDDLEWARE ==========
 class SubscriptionMiddleware:
@@ -2104,98 +2104,135 @@ class GardenHorizonsBot:
     async def monitor_loop(self):
         logger.info("🚀 Запущен цикл мониторинга API")
         
-        # ОПТИМИЗАЦИЯ: предзагружаем пользователей
+        # Предзагружаем пользователей
         all_users = get_all_users()
         for user_id in all_users:
             self.user_manager.get_user(user_id)
+        logger.info(f"📊 Предзагружено {len(all_users)} пользователей")
+        
+        last_check_log = time.time()
+        check_count = 0
         
         while True:
             try:
+                check_count += 1
+                current_time = time.time()
+                
+                # Лог каждую минуту для диагностики
+                if current_time - last_check_log >= 60:
+                    logger.info(f"⏱️ Цикл мониторинга жив, проверка #{check_count}, очередь: {self.message_queue.queue.qsize()}")
+                    last_check_log = current_time
+                
                 start_time = datetime.now()
                 new_data = self.fetch_api_data(force=True)
                 
-                if new_data and self.last_data:
-                    weather_changed = False
-                    weather_info = None
-                    weather_type = None
+                if not new_data:
+                    await asyncio.sleep(UPDATE_INTERVAL)
+                    continue
                     
-                    weather_status, wtype, end_timestamp = self.get_weather_change(self.last_data, new_data)
+                if not self.last_data:
+                    self.last_data = new_data
+                    logger.info(f"✅ Первые данные получены: {new_data.get('lastGlobalUpdate')}")
+                    await asyncio.sleep(UPDATE_INTERVAL)
+                    continue
+                
+                # Проверяем изменения в погоде
+                weather_changed = False
+                weather_info = None
+                weather_type = None
+                
+                weather_status, wtype, end_timestamp = self.get_weather_change(self.last_data, new_data)
+                
+                if weather_status and wtype:
+                    update_id = f"weather_{weather_status}_{datetime.now().isoformat()}"
                     
-                    if weather_status and wtype:
-                        update_id = f"weather_{weather_status}_{datetime.now().isoformat()}"
+                    if not was_weather_notification_sent(wtype, weather_status, update_id):
+                        weather_changed = True
+                        weather_type = wtype
+                        if weather_status == 'started':
+                            weather_info = self.format_weather_started_message(wtype, end_timestamp)
+                        else:
+                            weather_info = self.format_weather_ended_message(wtype)
                         
-                        if not was_weather_notification_sent(wtype, weather_status, update_id):
-                            weather_changed = True
-                            weather_type = wtype
-                            if weather_status == 'started':
-                                weather_info = self.format_weather_started_message(wtype, end_timestamp)
-                            else:
-                                weather_info = self.format_weather_ended_message(wtype)
-                            
-                            mark_weather_notification_sent(wtype, weather_status, update_id)
+                        mark_weather_notification_sent(wtype, weather_status, update_id)
+                        logger.info(f"🌤️ Изменение погоды: {weather_status} - {wtype}")
+                
+                # Проверяем изменения в стоке
+                old_update = self.last_data.get('lastGlobalUpdate')
+                new_update = new_data.get('lastGlobalUpdate')
+                
+                if new_update != old_update or weather_changed:
+                    if new_update != old_update:
+                        logger.info(f"📊 Обнаружены изменения в API! {old_update} -> {new_update}")
                     
-                    if new_data.get("lastGlobalUpdate") != self.last_data.get("lastGlobalUpdate") or weather_changed:
-                        update_id = new_data.get('lastGlobalUpdate', datetime.now().isoformat())
+                    update_id = new_update or datetime.now().isoformat()
+                    
+                    all_items = self.get_all_current_items(new_data)
+                    
+                    if all_items or weather_info:
+                        logger.info(f"📦 Предметов в стоке: {len(all_items)}")
                         
-                        all_items = self.get_all_current_items(new_data)
+                        # Формируем сообщение для каналов
+                        main_channel_items = {}
+                        for name, qty in all_items.items():
+                            if is_allowed_for_main_channel(name):
+                                main_channel_items[name] = qty
                         
-                        if all_items or weather_info:
-                            # Формируем сообщение для каналов
-                            main_channel_items = {}
-                            for name, qty in all_items.items():
-                                if is_allowed_for_main_channel(name):
-                                    main_channel_items[name] = qty
+                        # Отправка в каналы
+                        items_to_send = []
+                        for name, qty in main_channel_items.items():
+                            if not was_item_sent_in_this_update(name, qty, update_id):
+                                items_to_send.append((name, qty))
+                                mark_item_sent_for_update(name, qty, update_id)
+                        
+                        if items_to_send:
+                            logger.info(f"📢 Новых предметов для каналов: {len(items_to_send)}")
                             
-                            # Отправка в каналы
-                            items_to_send = []
-                            for name, qty in main_channel_items.items():
-                                if not was_item_sent_in_this_update(name, qty, update_id):
-                                    items_to_send.append((name, qty))
-                                    mark_item_sent_for_update(name, qty, update_id)
-                            
-                            if MAIN_CHANNEL_ID and items_to_send:
+                            # Основной канал
+                            if MAIN_CHANNEL_ID:
                                 for name, qty in items_to_send:
                                     msg = self.format_channel_message(name, qty)
                                     await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
                             
-                            if items_to_send:
-                                for channel in self.posting_channels:
-                                    try:
-                                        bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
-                                        if bot_member.status not in ['administrator', 'creator']:
-                                            continue
-                                    except:
+                            # Каналы автопостинга
+                            for channel in self.posting_channels:
+                                try:
+                                    bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
+                                    if bot_member.status not in ['administrator', 'creator']:
                                         continue
                                     
                                     for name, qty in items_to_send:
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
+                                except Exception as e:
+                                    logger.error(f"Ошибка проверки канала {channel['name']}: {e}")
+                        
+                        # Отправка пользователям
+                        users = get_all_users()
+                        if users:
+                            logger.info(f"👥 Начинаю отправку {len(users)} пользователям...")
+                            users_start = time.time()
                             
-                            # Отправка пользователям
-                            users = get_all_users()
+                            # Разбиваем на чанки по 500
+                            chunk_size = 500
+                            chunks = [users[i:i+chunk_size] for i in range(0, len(users), chunk_size)]
                             
-                            if users:
-                                # ОПТИМИЗАЦИЯ: параллельная обработка чанками
-                                chunk_size = 500
-                                chunks = [users[i:i+chunk_size] for i in range(0, len(users), chunk_size)]
-                                
-                                tasks = []
-                                for chunk in chunks:
-                                    task = asyncio.create_task(
-                                        self._process_user_chunk(chunk, all_items, weather_info, weather_type, update_id)
-                                    )
-                                    tasks.append(task)
-                                
-                                await asyncio.gather(*tasks)
+                            tasks = []
+                            for chunk in chunks:
+                                task = asyncio.create_task(
+                                    self._process_user_chunk(chunk, all_items, weather_info, weather_type, update_id)
+                                )
+                                tasks.append(task)
                             
-                            self.last_data = new_data
-                    
-                elif new_data and not self.last_data:
-                    self.last_data = new_data
-                    logger.info(f"✅ Первые данные получены")
+                            await asyncio.gather(*tasks)
+                            
+                            users_elapsed = time.time() - users_start
+                            logger.info(f"✅ Отправка пользователям завершена за {users_elapsed:.2f} сек")
+                        
+                        self.last_data = new_data
                 
                 elapsed = (datetime.now() - start_time).total_seconds()
-                sleep_time = max(3, UPDATE_INTERVAL - elapsed)  # ОПТИМИЗАЦИЯ: уменьшил до 3 секунд
+                sleep_time = max(3, UPDATE_INTERVAL - elapsed)
                 await asyncio.sleep(sleep_time)
                 
             except Exception as e:
@@ -2203,8 +2240,9 @@ class GardenHorizonsBot:
                 await asyncio.sleep(UPDATE_INTERVAL)
     
     async def _process_user_chunk(self, users, all_items, weather_info, weather_type, update_id):
-        """ОПТИМИЗАЦИЯ: обработка чанка пользователей"""
+        """Обработка чанка пользователей"""
         has_weather = weather_info and weather_type
+        sent_count = 0
         
         for user_id in users:
             try:
@@ -2234,19 +2272,23 @@ class GardenHorizonsBot:
                     if parts:
                         full_message = "\n\n".join(parts)
                         await self.message_queue.queue.put((user_id, full_message, 'HTML', None))
+                        sent_count += 1
                         
                         for name, qty in user_items:
                             mark_item_sent_to_user(user_id, name, qty, update_id)
                             
             except Exception as e:
                 logger.error(f"Ошибка пользователя {user_id}: {e}")
+        
+        if sent_count > 0:
+            logger.info(f"  Чанк: отправлено {sent_count} пользователям")
     
     async def run(self):
         logger.info("Получение данных при запуске...")
         initial_data = self.fetch_api_data(force=True)
         if initial_data:
             self.last_data = initial_data
-            logger.info(f"✅ Данные загружены")
+            logger.info(f"✅ Данные загружены: {initial_data.get('lastGlobalUpdate')}")
         else:
             logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         

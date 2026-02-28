@@ -743,7 +743,7 @@ class MessageQueue:
         self.queue = asyncio.Queue()
         self._tasks = []
         self.application = None
-        self.worker_count = 200
+        self.worker_count = 50
         self.sent_count = 0
         self.start_time = time.time()
         self.batch_size = 100

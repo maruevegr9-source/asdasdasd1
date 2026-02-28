@@ -1951,7 +1951,12 @@ class GardenHorizonsBot:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
         
-        # ===== АДМИН-КНОПКИ ===== (ЭТО ДОЛЖНО БЫТЬ ПОСЛЕ)
+        # ===== АДМИН-КНОПКИ ===== (ДОБАВЛЯЕМ add_post) =====
+        if query.data == "add_post":
+            logger.info("➕ Обработка add_post через ConversationHandler")
+            # Просто возвращаем False, чтобы обработка продолжилась в ConversationHandler
+            return False
+        
         if not settings.is_admin:
             logger.warning(f"⚠️ Неизвестный callback от не-админа: {query.data}")
             return

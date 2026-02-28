@@ -222,6 +222,19 @@ def init_database():
             )
         """)
         
+        # Таблица для истории рассылок
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mailing_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER,
+                text TEXT,
+                sent_at TEXT,
+                success_count INTEGER,
+                failed_count INTEGER,
+                total_count INTEGER
+            )
+        """)
+        
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована успешно")
@@ -233,7 +246,7 @@ def init_database():
 
 db_initialized = init_database()
 
-# ========== МИГРАЦИЯ БАЗЫ ДАННЫХ (ДОБАВЛЕНИЕ update_id) ==========
+# ========== МИГРАЦИЯ БАЗЫ ДАННЫХ ==========
 try:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -617,6 +630,41 @@ def mark_weather_notification_sent(weather_type: str, status: str, update_id: st
     except Exception as e:
         logger.error(f"❌ Ошибка отметки уведомления о погоде: {e}")
 
+# ========== ФУНКЦИИ ДЛЯ ПРОВЕРКИ ОТПРАВЛЕННЫХ В ЭТОМ ОБНОВЛЕНИИ ==========
+
+def was_item_sent_in_this_update(item_name: str, quantity: int, update_id: str) -> bool:
+    """Проверяет, был ли предмет отправлен в этом конкретном обновлении (в любой канал)"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM sent_items WHERE item_name = ? AND quantity = ? AND update_id = ?",
+            (item_name, quantity, update_id)
+        )
+        count = cur.fetchone()[0]
+        conn.close()
+        logger.info(f"🔍 Проверка update_id {update_id}: {item_name}={quantity} -> {'уже отправлен' if count > 0 else 'новый'}")
+        return count > 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки update_id: {e}")
+        return False
+
+def mark_item_sent_for_update(item_name: str, quantity: int, update_id: str):
+    """Отмечает предмет как отправленный в этом обновлении (во все каналы сразу)"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        # Используем chat_id = 0 как маркер "отправлено во все каналы"
+        cur.execute(
+            "INSERT OR IGNORE INTO sent_items (chat_id, item_name, quantity, update_id, sent_at) VALUES (?, ?, ?, ?, ?)",
+            (0, item_name, quantity, update_id, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"📝 Отмечено в БД (все каналы): {item_name}={quantity}, update_id={update_id}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка отметки update_id: {e}")
+
 # ----- СТАТИСТИКА -----
 
 def get_stats() -> Dict:
@@ -748,42 +796,65 @@ class UserManager:
     def save_users(self):
         pass
 
+# ========== ОПТИМИЗИРОВАННАЯ ОЧЕРЕДЬ СООБЩЕНИЙ ==========
+
 class MessageQueue:
-    def __init__(self, delay: float = 0.1):
+    def __init__(self, delay: float = 0.03):  # Минимальная задержка 0.03 сек
         self.queue = asyncio.Queue()
         self.delay = delay
-        self._task = None
+        self._tasks = []  # Несколько воркеров
         self.application = None
+        self.worker_count = 10  # 10 параллельных воркеров для быстрой отправки
+        self.sent_count = 0
+        self.start_time = time.time()
     
     async def start(self):
-        self._task = asyncio.create_task(self._worker())
+        """Запускаем несколько воркеров для параллельной отправки"""
+        for i in range(self.worker_count):
+            task = asyncio.create_task(self._worker(i))
+            self._tasks.append(task)
+        logger.info(f"✅ Запущено {self.worker_count} воркеров очереди (задержка {self.delay}с)")
     
     async def stop(self):
-        if self._task:
-            self._task.cancel()
+        for task in self._tasks:
+            task.cancel()
             try:
-                await self._task
+                await task
             except asyncio.CancelledError:
                 pass
     
-    async def _worker(self):
+    async def _worker(self, worker_id: int):
+        """Воркер с минимальной задержкой"""
         while True:
             try:
                 chat_id, text, parse_mode, photo = await self.queue.get()
+                
+                start_time = time.time()
                 try:
                     if photo:
                         await self._send_photo_with_retry(chat_id, photo, text, parse_mode)
                     else:
                         await self._send_with_retry(chat_id, text, parse_mode)
+                    
+                    self.sent_count += 1
+                    elapsed = time.time() - start_time
+                    
+                    # Логируем каждые 100 сообщений
+                    if self.sent_count % 100 == 0:
+                        total_time = time.time() - self.start_time
+                        speed = self.sent_count / total_time
+                        logger.info(f"📊 Статистика очереди: отправлено {self.sent_count} сообщений, скорость {speed:.1f} msg/сек")
+                        
                 except Exception as e:
-                    logger.error(f"Ошибка отправки в {chat_id}: {e}")
+                    logger.error(f"❌ Ошибка отправки в {chat_id} (воркер {worker_id}): {e}")
                 finally:
                     self.queue.task_done()
-                    await asyncio.sleep(self.delay)
+                    await asyncio.sleep(self.delay)  # Минимальная задержка
+                    
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Ошибка в очереди: {e}")
+                logger.error(f"❌ Ошибка в воркере {worker_id}: {e}")
                 await asyncio.sleep(1)
     
     async def _send_with_retry(self, chat_id: int, text: str, parse_mode: str, max_retries: int = 3):
@@ -797,10 +868,14 @@ class MessageQueue:
                 )
                 return
             except RetryAfter as e:
-                await asyncio.sleep(e.retry_after)
+                wait_time = e.retry_after
+                logger.warning(f"⏳ RetryAfter для {chat_id}, ждем {wait_time}с")
+                await asyncio.sleep(wait_time)
             except TimedOut:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    wait_time = 2 ** attempt
+                    logger.warning(f"⏳ Таймаут для {chat_id}, попытка {attempt+1}, ждем {wait_time}с")
+                    await asyncio.sleep(wait_time)
                 else:
                     raise
             except Forbidden as e:
@@ -808,7 +883,8 @@ class MessageQueue:
                 return
             except Exception as e:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    wait_time = 2 ** attempt
+                    await asyncio.sleep(wait_time)
                 else:
                     raise
     
@@ -823,10 +899,13 @@ class MessageQueue:
                 )
                 return
             except RetryAfter as e:
-                await asyncio.sleep(e.retry_after)
+                wait_time = e.retry_after
+                logger.warning(f"⏳ RetryAfter для фото в {chat_id}, ждем {wait_time}с")
+                await asyncio.sleep(wait_time)
             except TimedOut:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    wait_time = 2 ** attempt
+                    await asyncio.sleep(wait_time)
                 else:
                     raise
             except Forbidden as e:
@@ -834,7 +913,8 @@ class MessageQueue:
                 return
             except Exception as e:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    wait_time = 2 ** attempt
+                    await asyncio.sleep(wait_time)
                 else:
                     raise
 
@@ -950,7 +1030,8 @@ class GardenHorizonsBot:
         self.mandatory_channels = get_mandatory_channels()
         self.posting_channels = get_posting_channels()
         self.mailing_text = None
-        self.message_queue = MessageQueue(delay=0.1)
+        # ОПТИМИЗАЦИЯ: очередь с минимальной задержкой
+        self.message_queue = MessageQueue(delay=0.03)  # 0.03 секунды между сообщениями
         self.message_queue.application = self.application
         self.session = requests.Session()
         self.session.headers.update({
@@ -1534,18 +1615,24 @@ class GardenHorizonsBot:
         return MAILING_TEXT
     
     async def mailing_get_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение текста рассылки"""
         user_id = update.effective_user.id
         text = update.message.text
         
+        # Сохраняем текст в context.user_data
         context.user_data['mailing_text'] = text
+        
+        # Сохраняем ID сообщения с текстом, чтобы потом его удалить
+        context.user_data['mailing_text_message_id'] = update.message.message_id
         
         keyboard = [
             [InlineKeyboardButton("✅ ОТПРАВИТЬ", callback_data="mailing_yes"),
              InlineKeyboardButton("❌ ОТМЕНИТЬ", callback_data="mailing_no")]
         ]
         
+        # Отправляем сообщение с подтверждением
         await update.message.reply_text(
-            f"<b>📧 Подтверждение рассылки</b>\n\n{text}\n\n<b>Отправить?</b>",
+            f"<b>📧 Подтверждение рассылки</b>\n\n{text}\n\n<b>Отправить это сообщение всем пользователям?</b>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1553,55 +1640,101 @@ class GardenHorizonsBot:
         return ConversationHandler.END
     
     async def mailing_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Подтверждение и отправка рассылки"""
+        """Подтверждение и отправка рассылки - ИСПРАВЛЕНО"""
         query = update.callback_query
         user_id = query.from_user.id
         await query.answer()
         
+        # Проверяем права
+        if user_id != ADMIN_ID:
+            await query.message.reply_text("❌ <b>У вас нет прав!</b>", parse_mode='HTML')
+            return
+        
         if query.data == "mailing_no":
-            await query.message.reply_text("❌ <b>Рассылка отменена</b>", parse_mode='HTML')
+            await query.message.edit_text("❌ <b>Рассылка отменена</b>", parse_mode='HTML')
+            # Показываем админ-панель
             await self.show_admin_panel_callback(query)
             return
         
+        # Получаем текст из context.user_data
         text = context.user_data.get('mailing_text', '')
         if not text:
-            await query.message.reply_text("❌ <b>Ошибка: текст не найден</b>", parse_mode='HTML')
+            await query.message.edit_text("❌ <b>Ошибка: текст не найден</b>", parse_mode='HTML')
             await self.show_admin_panel_callback(query)
             return
         
-        await query.message.reply_text("📧 <b>Начинаю рассылку...</b>", parse_mode='HTML')
+        # Удаляем сообщение с кнопками подтверждения
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления сообщения: {e}")
+        
+        # Отправляем сообщение о начале рассылки
+        status_msg = await context.bot.send_message(
+            chat_id=user_id,
+            text="📧 <b>Начинаю рассылку...</b>",
+            parse_mode='HTML'
+        )
         
         success = 0
         failed = 0
+        blocked = 0
         users = get_all_users()
         
         for uid in users:
             try:
-                await self.application.bot.send_message(
+                await context.bot.send_message(
                     chat_id=uid,
                     text=f"<b>📢 РАССЫЛКА</b>\n\n{text}",
                     parse_mode='HTML'
                 )
                 success += 1
+                # Небольшая задержка чтобы не флудить
                 await asyncio.sleep(0.05)
-            except Forbidden as e:
+            except Forbidden:
+                # Пользователь заблокировал бота
+                blocked += 1
                 failed += 1
-                logger.warning(f"⚠️ Пользователь {uid} заблокировал бота, пропускаем")
+                logger.warning(f"⚠️ Пользователь {uid} заблокировал бота")
             except Exception as e:
                 failed += 1
                 logger.error(f"❌ Ошибка отправки пользователю {uid}: {e}")
         
-        await query.message.reply_text(
+        # Удаляем статусное сообщение
+        try:
+            await status_msg.delete()
+        except:
+            pass
+        
+        # Отправляем отчет
+        report = (
             f"<b>📊 ОТЧЕТ О РАССЫЛКЕ</b>\n\n"
-            f"✅ <b>Успешно:</b> {success}\n"
-            f"❌ <b>Ошибок:</b> {failed}\n"
-            f"👥 <b>Всего:</b> {len(users)}",
+            f"✅ <b>Успешно доставлено:</b> {success}\n"
+            f"❌ <b>Ошибок отправки:</b> {failed}\n"
+            f"👥 <b>Всего пользователей:</b> {len(users)}\n"
+            f"📝 <b>Текст:</b> {text[:100]}{'...' if len(text) > 100 else ''}"
+        )
+        
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=report,
             parse_mode='HTML'
         )
         
+        # Очищаем данные
         if 'mailing_text' in context.user_data:
             del context.user_data['mailing_text']
+        if 'mailing_text_message_id' in context.user_data:
+            try:
+                await context.bot.delete_message(
+                    chat_id=user_id,
+                    message_id=context.user_data['mailing_text_message_id']
+                )
+            except:
+                pass
+            del context.user_data['mailing_text_message_id']
         
+        # Показываем админ-панель
         await self.show_admin_panel_callback(query)
     
     # ========== СТАТИСТИКА ==========
@@ -1951,7 +2084,7 @@ class GardenHorizonsBot:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
         
-        # ===== АДМИН-КНОПКИ ===== (ДОБАВЛЯЕМ add_post) =====
+        # ===== АДМИН-КНОПКИ =====
         if query.data == "add_post":
             logger.info("➕ Обработка add_post через ConversationHandler")
             # Просто возвращаем False, чтобы обработка продолжилась в ConversationHandler
@@ -2322,48 +2455,52 @@ class GardenHorizonsBot:
                             
                             logger.info(f"📊 Предметов для каналов: {len(main_channel_items)}")
                             
-                            # 1. Отправляем в ОСНОВНОЙ канал
-                            if MAIN_CHANNEL_ID and main_channel_items:
-                                logger.info(f"📢 НАЧАЛО отправки в ОСНОВНОЙ канал")
-                                for name, qty in main_channel_items.items():
-                                    logger.info(f"🔍 Проверка дубликата: {name}={qty}, update_id={update_id}")
-                                    if not was_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id):
-                                        msg = self.format_channel_message(name, qty)
-                                        await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
-                                        mark_item_sent(int(MAIN_CHANNEL_ID), name, qty, update_id)
-                                        logger.info(f"📢 В основной канал: {name} = {qty} (update_id: {update_id})")
-                                    else:
-                                        logger.info(f"⏭️ Предмет {name} = {qty} уже отправлен для update_id={update_id}")
+                            # ===== ИСПРАВЛЕНИЕ ДУБЛИРОВАНИЯ =====
+                            # 1. Собираем предметы для отправки (проверяем по update_id)
+                            items_to_send = []
+                            for name, qty in main_channel_items.items():
+                                if not was_item_sent_in_this_update(name, qty, update_id):
+                                    items_to_send.append((name, qty))
+                                    # Отмечаем для этого update_id
+                                    mark_item_sent_for_update(name, qty, update_id)
+                                else:
+                                    logger.info(f"⏭️ Предмет {name} = {qty} уже отправлен в этом обновлении")
                             
-                            # 2. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
-                            logger.info(f"📢 НАЧАЛО отправки в каналы автопостинга. Всего каналов: {len(self.posting_channels)}")
-                            for channel in self.posting_channels:
-                                logger.info(f"🔍 Обрабатываю канал: {channel['name']} (ID: {channel['id']})")
-                                
-                                try:
-                                    bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
-                                    logger.info(f"   Статус бота в канале: {bot_member.status}")
+                            # 2. Отправляем в ОСНОВНОЙ канал
+                            if MAIN_CHANNEL_ID and items_to_send:
+                                logger.info(f"📢 НАЧАЛО отправки в ОСНОВНОЙ канал")
+                                for name, qty in items_to_send:
+                                    msg = self.format_channel_message(name, qty)
+                                    await self.message_queue.queue.put((int(MAIN_CHANNEL_ID), msg, 'HTML', None))
+                                    logger.info(f"📢 В основной канал: {name} = {qty} (update_id: {update_id})")
+                            
+                            # 3. Отправляем в ДОПОЛНИТЕЛЬНЫЕ каналы (автопостинг)
+                            if items_to_send:
+                                logger.info(f"📢 НАЧАЛО отправки в каналы автопостинга. Всего каналов: {len(self.posting_channels)}")
+                                for channel in self.posting_channels:
+                                    logger.info(f"🔍 Обрабатываю канал: {channel['name']} (ID: {channel['id']})")
                                     
-                                    if bot_member.status not in ['administrator', 'creator']:
-                                        logger.warning(f"   ⚠️ Бот НЕ администратор в канале {channel['name']}, ПРОПУСКАЮ")
-                                        continue
-                                    else:
-                                        logger.info(f"   ✅ Бот администратор в канале {channel['name']}, отправляю")
+                                    try:
+                                        bot_member = await self.application.bot.get_chat_member(int(channel['id']), self.application.bot.id)
+                                        logger.info(f"   Статус бота в канале: {bot_member.status}")
                                         
-                                except Exception as e:
-                                    logger.error(f"   ❌ Ошибка проверки прав в канале {channel['name']}: {e}")
-                                    continue
-                                
-                                for name, qty in main_channel_items.items():
-                                    if not was_item_sent(int(channel['id']), name, qty, update_id):
+                                        if bot_member.status not in ['administrator', 'creator']:
+                                            logger.warning(f"   ⚠️ Бот НЕ администратор в канале {channel['name']}, ПРОПУСКАЮ")
+                                            continue
+                                        else:
+                                            logger.info(f"   ✅ Бот администратор в канале {channel['name']}, отправляю")
+                                            
+                                    except Exception as e:
+                                        logger.error(f"   ❌ Ошибка проверки прав в канале {channel['name']}: {e}")
+                                        continue
+                                    
+                                    for name, qty in items_to_send:
+                                        # НЕ проверяем повторно, так как уже проверили по update_id
                                         msg = self.format_channel_message(name, qty)
                                         await self.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
-                                        mark_item_sent(int(channel['id']), name, qty, update_id)
                                         logger.info(f"   📢 В канал автопостинга {channel['name']}: {name} = {qty}")
-                                    else:
-                                        logger.info(f"   ⏭️ Предмет {name} = {qty} уже отправлен в канал {channel['name']}")
                             
-                            # 3. Отправляем пользователям (личные сообщения)
+                            # 4. Отправляем пользователям (личные сообщения)
                             users = get_all_users()
                             logger.info(f"👥 Отправка пользователям: {len(users)}")
                             

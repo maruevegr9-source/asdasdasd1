@@ -1069,7 +1069,8 @@ class DiscordListener:
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
                     
-                    url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=1"
+                    # Берем 5 последних сообщений, чтобы не пропустить новые
+                    url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
                     r = requests.get(url, headers=self.headers, timeout=5)
                     
                     logger.info(f"📊 Статус ответа: {r.status_code}")
@@ -1078,31 +1079,35 @@ class DiscordListener:
                         messages = r.json()
                         logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
                         
-                        if messages:
-                            msg = messages[0]
+                        # Перебираем все полученные сообщения (от новых к старым)
+                        for msg in messages:
                             msg_id = msg['id']
                             author = msg['author']['username']
-                            logger.info(f"👤 Автор последнего: {author}")
+                            
+                            # Создаем уникальный ключ для каждого сообщения
+                            msg_key = f"{channel_id}_{msg_id}"
                             
                             # Проверяем, не обрабатывали ли уже это сообщение
-                            if self.last_messages.get(str(channel_id)) != msg_id:
-                                logger.info(f"🆕 Новое сообщение от {author}")
+                            if msg_key in self.last_messages:
+                                logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
+                                continue
+                            
+                            logger.info(f"🆕 Новое сообщение от {author}, ID: {msg_id}")
+                            
+                            if author == 'Dawnbot':
+                                logger.info(f"📨 Это Dawnbot! Парсим...")
+                                all_items, rare_items = self.parse_message(msg, channel_name)
                                 
-                                if author == 'Dawnbot':
-                                    logger.info(f"📨 Это Dawnbot! Парсим...")
-                                    all_items, rare_items = self.parse_message(msg, channel_name)
-                                    
-                                    logger.info(f"📦 Найдено предметов: всего {len(all_items)}, редких {len(rare_items)}")
-                                    
-                                    if all_items or rare_items:
-                                        await self.send_to_destinations(all_items, rare_items)
-                                    
-                                    self.last_messages[str(channel_id)] = msg_id
-                                    self.save_last()
-                                else:
-                                    logger.info(f"⏭️ Не Dawnbot, пропускаем")
+                                logger.info(f"📦 Найдено предметов: всего {len(all_items)}, редких {len(rare_items)}")
+                                
+                                if all_items or rare_items:
+                                    await self.send_to_destinations(all_items, rare_items)
+                                
+                                # Сохраняем ID обработанного сообщения
+                                self.last_messages[msg_key] = True
+                                self.save_last()
                             else:
-                                logger.info(f"⏭️ Сообщение уже обработано ранее")
+                                logger.info(f"⏭️ Не Dawnbot, пропускаем")
                     else:
                         logger.error(f"❌ Ошибка Discord API: {r.status_code}")
                     

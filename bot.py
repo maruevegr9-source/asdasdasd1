@@ -41,7 +41,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 
-# Данные для Discord - БЕРЁМ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# Данные для Discord
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 DISCORD_CHANNELS = {
@@ -50,7 +50,6 @@ DISCORD_CHANNELS = {
     'weather': int(os.getenv("DISCORD_WEATHER_CHANNEL", "1474799519706255510"))
 }
 
-# Старое API
 API_URL = os.getenv("API_URL", "https://stock.gardenhorizonswiki.com/stock.json")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))
 ADMIN_ID = 8025951500
@@ -109,6 +108,7 @@ TRANSLATIONS = {
     "Tomato": "🍅 Помидор", "Apple": "🍎 Яблоко", "Rose": "🌹 Роза",
     "Wheat": "🌾 Пшеница", "Banana": "🍌 Банан", "Plum": "🍐 Слива",
     "Potato": "🥔 Картофель", "Cabbage": "🥬 Капуста", "Cherry": "🍒 Вишня",
+    "Mango": "🥭 Манго", "Bamboo": "🎋 Бамбук",
     "Watering Can": "💧 Лейка", "Basic Sprinkler": "💦 Простой разбрызгиватель",
     "Harvest Bell": "🔔 Колокол сбора", "Turbo Sprinkler": "⚡ Турбо-разбрызгиватель",
     "Favorite Tool": "⭐ Любимый инструмент", "Super Sprinkler": "💎 Супер-разбрызгиватель",
@@ -116,11 +116,11 @@ TRANSLATIONS = {
     "storm": "⛈️ Шторм", "sandstorm": "🏜️ Песчаная буря", "starfall": "⭐ Звездопад"
 }
 
-ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry"]
-SEEDS_LIST = ["Carrot", "Corn", "Onion", "Strawberry", "Mushroom", "Beetroot", "Tomato", "Apple", "Rose", "Wheat", "Banana", "Plum", "Potato", "Cabbage", "Cherry"]
+ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
+SEEDS_LIST = ["Carrot", "Corn", "Onion", "Strawberry", "Mushroom", "Beetroot", "Tomato", "Apple", "Rose", "Wheat", "Banana", "Plum", "Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
 GEAR_LIST = ["Watering Can", "Basic Sprinkler", "Harvest Bell", "Turbo Sprinkler", "Favorite Tool", "Super Sprinkler"]
 WEATHER_LIST = ["fog", "rain", "snow", "storm", "sandstorm", "starfall"]
-RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall"]
+RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall", "Mango", "Bamboo"]
 
 def translate(text: str) -> str:
     return TRANSLATIONS.get(text, text)
@@ -883,7 +883,7 @@ class DiscordListener:
     
     def get_role_name(self, role_id):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
-            return f"роль {role_id}"
+            return None
             
         if role_id in self.role_cache:
             return self.role_cache[role_id]
@@ -898,23 +898,77 @@ class DiscordListener:
                         return role['name']
         except:
             pass
-        return f"роль {role_id}"
+        return None
+    
+    def format_channel_message(self, item_name: str, quantity: int = None) -> str:
+        translated = translate(item_name)
+        quantity_text = f"📦 Количество: {quantity} шт.\n" if quantity else ""
+        return (
+            f"✨ {translated}\n"
+            f"{quantity_text}"
+            f"━━━━━━━━━━━━━━\n"
+            f"<a href='{DEFAULT_REQUIRED_CHANNEL_LINK}'>📢 Наш канал</a> | <a href='{BOT_LINK}'>🤖 Авто-сток</a> | <a href='{CHAT_LINK}'>💬 Наш чат</a>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"👀 Включи уведомления в канале!"
+        )
+    
+    def format_pm_message(self, items: List[tuple], weather_info: str = None) -> str:
+        message_parts = []
+        
+        if weather_info:
+            message_parts.append(weather_info)
+        
+        if items:
+            msg_items = []
+            for name, qty in items:
+                translated = translate(name)
+                msg_items.append(f"{translated}: {qty} шт.")
+            
+            if msg_items:
+                message_parts.append("🔔 НОВЫЕ ПРЕДМЕТЫ В СТОКЕ\n\n" + "\n".join(msg_items))
+        
+        return "\n\n".join(message_parts) if message_parts else None
     
     def parse_message(self, msg, channel_name):
-        items = []
+        all_items = []
+        rare_items = []
+        
         if msg.get('mention_roles'):
             for role_id in msg['mention_roles']:
                 role_name = self.get_role_name(role_id)
-                items.append(f"• {role_name}")
+                if role_name:
+                    all_items.append((role_name, 1))
+                    if is_allowed_for_main_channel(role_name):
+                        rare_items.append((role_name, 1))
         
-        if items:
-            return f"🌱 <b>СТОК ОБНОВИЛСЯ ({channel_name.upper()})</b>\n\n" + "\n".join(items)
-        return None
+        return all_items, rare_items
     
-    async def send_to_telegram(self, text):
-        if self.main_channel_id and self.bot and self.bot.message_queue:
-            await self.bot.message_queue.queue.put((self.main_channel_id, text, 'HTML', None))
-            logger.info(f"📤 Отправлено из Discord в Telegram канал")
+    async def send_to_destinations(self, all_items, rare_items, weather_info=None):
+        if rare_items and self.main_channel_id:
+            for item_name, qty in rare_items:
+                msg = self.format_channel_message(item_name, qty)
+                await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
+                logger.info(f"📤 Редкий предмет в канал: {item_name}")
+        
+        if all_items:
+            pm_message = self.format_pm_message(all_items, weather_info)
+            if pm_message:
+                users = get_all_users()
+                for user_id in users:
+                    if user_id != ADMIN_ID:
+                        settings = self.bot.user_manager.get_user(user_id)
+                        if settings.notifications_enabled:
+                            await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
+                logger.info(f"📤 Отправлено {len(users)} пользователям")
+        
+        if rare_items:
+            for channel in self.bot.posting_channels:
+                try:
+                    for item_name, qty in rare_items:
+                        msg = self.format_channel_message(item_name, qty)
+                        await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
+                except Exception as e:
+                    logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -937,9 +991,11 @@ class DiscordListener:
                             
                             if self.last_messages.get(str(channel_id)) != msg_id:
                                 if msg['author']['username'] == 'Dawnbot':
-                                    text = self.parse_message(msg, channel_name)
-                                    if text:
-                                        await self.send_to_telegram(text)
+                                    all_items, rare_items = self.parse_message(msg, channel_name)
+                                    
+                                    if all_items or rare_items:
+                                        await self.send_to_destinations(all_items, rare_items)
+                                    
                                     self.last_messages[str(channel_id)] = msg_id
                                     self.save_last()
                     
@@ -2041,7 +2097,11 @@ class GardenHorizonsBot:
             return
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         user = update.effective_user
+        if not user:
+            return
         text = update.message.text
         
         if any(key in context.user_data for key in ['op_channel_id', 'post_channel_id', 'mailing_text']):

@@ -25,7 +25,7 @@ load_dotenv()
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Изменено на DEBUG для более подробного логирования
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('bot.log', encoding='utf-8'),
@@ -516,6 +516,7 @@ def was_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_id
         )
         count = cur.fetchone()[0]
         conn.close()
+        logger.debug(f"🔍 Проверка отправки для user={user_id}, item={item_name}, qty={quantity}, update={update_id}: {count > 0}")
         return count > 0
     except Exception as e:
         logger.error(f"❌ Ошибка проверки отправленного предмета: {e}")
@@ -531,6 +532,7 @@ def mark_item_sent_to_user(user_id: int, item_name: str, quantity: int, update_i
         )
         conn.commit()
         conn.close()
+        logger.debug(f"✅ Отмечена отправка для user={user_id}, item={item_name}, qty={quantity}, update={update_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка отметки отправленного предмета: {e}")
 
@@ -915,9 +917,10 @@ class DiscordListener:
                 for role in roles:
                     self.role_cache[role['id']] = role['name']
                     if role['id'] == str(role_id):
+                        logger.debug(f"🔍 Найдена роль: {role['name']} (ID: {role_id})")
                         return role['name']
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения роли {role_id}: {e}")
         return None
     
     def parse_message(self, msg, channel_name):
@@ -926,38 +929,58 @@ class DiscordListener:
         rare_items = []  # список кортежей (item_name, quantity)
         weather_info = None  # информация о погоде
         
+        # Логируем всю структуру сообщения для отладки
+        logger.info(f"🔍 ПОЛНАЯ СТРУКТУРА СООБЩЕНИЯ ИЗ КАНАЛА {channel_name}:")
+        logger.info(f"🔍 Message ID: {msg.get('id')}")
+        logger.info(f"🔍 Author: {msg.get('author', {}).get('username')}")
+        logger.info(f"🔍 Content: {msg.get('content')}")
+        
         # Собираем весь текст из сообщения
         full_text = ""
+        
+        # Проверяем content
         if msg.get('content'):
             full_text += msg['content'] + "\n"
+            logger.info(f"📝 Content найден: {msg['content'][:200]}")
+        
+        # Проверяем embeds
         if msg.get('embeds'):
-            for embed in msg['embeds']:
+            logger.info(f"📦 Найдено embeds: {len(msg['embeds'])}")
+            for i, embed in enumerate(msg['embeds']):
+                logger.info(f"  📦 Embed #{i}:")
                 if embed.get('title'):
                     full_text += embed['title'] + "\n"
+                    logger.info(f"    Title: {embed['title']}")
                 if embed.get('description'):
                     full_text += embed['description'] + "\n"
+                    logger.info(f"    Description: {embed['description'][:200]}")
                 if embed.get('fields'):
-                    for field in embed['fields']:
+                    logger.info(f"    Fields: {len(embed['fields'])}")
+                    for j, field in enumerate(embed['fields']):
                         if field.get('name'):
                             full_text += field['name'] + "\n"
+                            logger.info(f"      Field #{j} name: {field['name']}")
                         if field.get('value'):
                             full_text += field['value'] + "\n"
+                            logger.info(f"      Field #{j} value: {field['value'][:200]}")
         
-        logger.info(f"📄 Полный текст сообщения из канала {channel_name}: {full_text}")
+        logger.info(f"📄 ПОЛНЫЙ ТЕКСТ СООБЩЕНИЯ (первые 500 символов): {full_text[:500]}")
         
         # Проверяем, есть ли в сообщении информация о погоде
         if channel_name == 'weather':
             for weather in WEATHER_LIST:
                 if weather in full_text.lower():
+                    logger.info(f"🌤 Найдена погода: {weather}")
                     # Извлекаем время окончания, если есть
                     end_timestamp = None
                     # Ищем время в формате "until XX:XX"
                     time_match = re.search(r'until (\d{1,2}:\d{2})', full_text, re.IGNORECASE)
                     if time_match:
+                        logger.info(f"⏰ Найдено время: {time_match.group(1)}")
                         # TODO: конвертировать время в timestamp если нужно
                         pass
                     weather_info = self.format_weather_started_message(weather, end_timestamp)
-                    logger.info(f"🌤 Найдена информация о погоде: {weather_info}")
+                    logger.info(f"🌤 Сформирована информация о погоде: {weather_info}")
                     break
         
         # Ищем все упоминания предметов в формате @Item (xN)
@@ -965,20 +988,68 @@ class DiscordListener:
         pattern = r'@(\w+)\s*\(x(\d+)\)'
         matches = re.findall(pattern, full_text)
         
-        logger.info(f"🔍 Найдено совпадений: {matches}")
+        logger.info(f"🔍 Найдено совпадений по паттерну @Item (xN): {matches}")
         
         for match in matches:
             item_name = match[0]
             quantity = int(match[1])
             
+            logger.info(f"  - Найден предмет: {item_name} x{quantity}")
+            
             # Проверяем, есть ли такой предмет в наших списках
-            if item_name in SEEDS_LIST or item_name in GEAR_LIST or item_name in WEATHER_LIST:
+            if item_name in SEEDS_LIST:
                 all_items.append((item_name, quantity))
                 if is_allowed_for_main_channel(item_name):
                     rare_items.append((item_name, quantity))
-                logger.info(f"✅ Найден предмет: {item_name} x{quantity}")
+                logger.info(f"    ✅ Добавлен в seeds: {item_name} x{quantity}")
+            elif item_name in GEAR_LIST:
+                all_items.append((item_name, quantity))
+                if is_allowed_for_main_channel(item_name):
+                    rare_items.append((item_name, quantity))
+                logger.info(f"    ✅ Добавлен в gear: {item_name} x{quantity}")
+            elif item_name in WEATHER_LIST:
+                all_items.append((item_name, quantity))
+                if is_allowed_for_main_channel(item_name):
+                    rare_items.append((item_name, quantity))
+                logger.info(f"    ✅ Добавлен в weather: {item_name} x{quantity}")
             else:
-                logger.info(f"⚠️ Неизвестный предмет: {item_name}")
+                logger.info(f"    ❌ Неизвестный предмет: {item_name}")
+        
+        # Также ищем предметы без @
+        pattern2 = r'(\w+)\s*\(x(\d+)\)'
+        matches2 = re.findall(pattern2, full_text)
+        if matches2:
+            logger.info(f"🔍 Найдено совпадений по паттерну Item (xN) без @: {matches2}")
+            for match in matches2:
+                item_name = match[0]
+                quantity = int(match[1])
+                
+                # Проверяем, не добавили ли уже этот предмет через @
+                already_added = False
+                for existing_item, _ in all_items:
+                    if existing_item == item_name:
+                        already_added = True
+                        break
+                
+                if not already_added:
+                    logger.info(f"  - Найден предмет без @: {item_name} x{quantity}")
+                    if item_name in SEEDS_LIST:
+                        all_items.append((item_name, quantity))
+                        if is_allowed_for_main_channel(item_name):
+                            rare_items.append((item_name, quantity))
+                        logger.info(f"    ✅ Добавлен в seeds: {item_name} x{quantity}")
+                    elif item_name in GEAR_LIST:
+                        all_items.append((item_name, quantity))
+                        if is_allowed_for_main_channel(item_name):
+                            rare_items.append((item_name, quantity))
+                        logger.info(f"    ✅ Добавлен в gear: {item_name} x{quantity}")
+                    elif item_name in WEATHER_LIST:
+                        all_items.append((item_name, quantity))
+                        if is_allowed_for_main_channel(item_name):
+                            rare_items.append((item_name, quantity))
+                        logger.info(f"    ✅ Добавлен в weather: {item_name} x{quantity}")
+        
+        logger.info(f"📦 ИТОГО: all_items={all_items}, rare_items={rare_items}, weather_info={weather_info}")
         
         return all_items, rare_items, weather_info
     
@@ -1033,27 +1104,31 @@ class DiscordListener:
     async def send_to_destinations(self, all_items, rare_items, weather_info=None, channel_name=None):
         """Отправляет данные в канал и личку (только новые)"""
         
+        logger.info(f"📦 send_to_destinations вызван с: all_items={all_items}, rare_items={rare_items}, weather_info={weather_info}, channel={channel_name}")
+        
         if not all_items and not rare_items and not weather_info:
             logger.warning("⚠️ Нет данных для отправки")
             return
             
         # Единый update_id для всего сообщения
         update_id = str(int(time.time()))
-        
-        # Логируем полученные данные
-        logger.info(f"📦 Отправка: all_items={all_items}, rare_items={rare_items}, weather_info={weather_info}, channel={channel_name}")
+        logger.info(f"🆔 Создан update_id: {update_id}")
         
         # 1. Отправка в основной канал (только редкие)
         if rare_items and self.main_channel_id:
+            logger.info(f"📤 Отправка редких предметов в основной канал {self.main_channel_id}")
             for item_name, qty in rare_items:
                 if not was_item_sent_in_this_update(item_name, qty, update_id):
                     msg = self.format_channel_message(item_name, qty)
                     await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
                     mark_item_sent_for_update(item_name, qty, update_id)
                     logger.info(f"📤 Редкий предмет в основной канал: {item_name} x{qty}")
+                else:
+                    logger.info(f"⏭️ Редкий предмет {item_name} x{qty} уже отправлен в этом update")
         
         # 2. Отправка в каналы автопостинга (только редкие)
         if rare_items:
+            logger.info(f"📤 Отправка редких предметов в каналы автопостинга")
             for channel in self.bot.posting_channels:
                 try:
                     for item_name, qty in rare_items:
@@ -1068,18 +1143,19 @@ class DiscordListener:
         if all_items or weather_info:
             users = get_all_users()
             if users:
+                logger.info(f"👥 Начинаем отправку для {len(users)} пользователей")
                 sent_count = 0
                 skipped_no_notifications = 0
                 skipped_no_subscription = 0
                 skipped_already_sent = 0
                 
-                logger.info(f"👥 Начинаем отправку для {len(users)} пользователей")
-                
                 for user_id in users:
                     if user_id == ADMIN_ID:
+                        logger.debug(f"⏭️ Пропускаем админа {user_id}")
                         continue
                     
                     settings = self.bot.user_manager.get_user(user_id)
+                    logger.debug(f"👤 Пользователь {user_id}: notifications_enabled={settings.notifications_enabled}")
                     
                     # Проверяем, включены ли уведомления у пользователя
                     if not settings.notifications_enabled:
@@ -1153,7 +1229,7 @@ class DiscordListener:
                                 logger.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
                                 pass
                 
-                logger.info(f"📊 Статистика отправки: отправлено={sent_count}, без уведомлений={skipped_no_notifications}, не подписаны={skipped_no_subscription}, уже отправлено={skipped_already_sent}")
+                logger.info(f"📊 СТАТИСТИКА ОТПРАВКИ: отправлено={sent_count}, без уведомлений={skipped_no_notifications}, не подписаны={skipped_no_subscription}, уже отправлено={skipped_already_sent}")
                 if sent_count > 0:
                     items_summary = ", ".join([f"{name} x{qty}" for name, qty in all_items])
                     logger.info(f"📦 Отправленные предметы: {items_summary}")
@@ -1171,7 +1247,10 @@ class DiscordListener:
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
                     
                     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
+                    logger.debug(f"🌐 Запрос к Discord API: {url}")
+                    
                     r = requests.get(url, headers=self.headers, timeout=5)
+                    logger.debug(f"📡 Статус ответа: {r.status_code}")
                     
                     if r.status_code == 200:
                         messages = r.json()
@@ -1187,21 +1266,22 @@ class DiscordListener:
                             # Пропускаем старые сообщения при первом запуске
                             if self.first_run:
                                 self.last_messages.add(msg_key)
-                                logger.info(f"🚀 Первый запуск, сохраняем ID {msg_id} без обработки")
+                                logger.info(f"🚀 Первый запуск, сохраняем ID {msg_id} от {author} без обработки")
                                 continue
                             
                             # Проверяем, не обрабатывали ли уже
                             if msg_key in self.last_messages:
-                                logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
+                                logger.info(f"⏭️ Сообщение {msg_id} от {author} уже обработано ранее")
                                 continue
                             
                             logger.info(f"🆕 НОВОЕ сообщение от {author}, ID: {msg_id}")
                             
                             if author == 'Dawnbot':
-                                logger.info(f"📨 Это Dawnbot! Парсим...")
+                                logger.info(f"📨 Это Dawnbot! Начинаем парсинг...")
                                 all_items, rare_items, weather_info = self.parse_message(msg, channel_name)
                                 
                                 if all_items or rare_items or weather_info:
+                                    logger.info(f"🎉 Найдены данные для отправки!")
                                     await self.send_to_destinations(all_items, rare_items, weather_info, channel_name)
                                 else:
                                     logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
@@ -1214,7 +1294,7 @@ class DiscordListener:
                                 if self.processed_count % 10 == 0:
                                     self.save_last()
                             else:
-                                logger.info(f"⏭️ Не Dawnbot, пропускаем")
+                                logger.info(f"⏭️ Не Dawnbot (автор: {author}), пропускаем")
                         
                         # После первого цикла отключаем флаг и сохраняем
                         if self.first_run:
@@ -1227,7 +1307,7 @@ class DiscordListener:
                 await asyncio.sleep(10)
                 
             except Exception as e:
-                logger.error(f"❌ Discord ошибка: {e}")
+                logger.error(f"❌ Discord ошибка: {e}", exc_info=True)
                 await asyncio.sleep(30)
     
     def stop(self):

@@ -920,45 +920,67 @@ class DiscordListener:
             pass
         return None
     
-    def extract_quantity(self, msg, role_name):
-        """Извлекает количество для конкретной роли из текста"""
-        full_text = ""
-        if msg.get('content'):
-            full_text += msg['content']
-        if msg.get('embeds'):
-            for embed in msg['embeds']:
-                if embed.get('description'):
-                    full_text += embed['description']
-        
-        # Ищем @Rose (x4) или Rose x4
-        patterns = [
-            rf'@?{re.escape(role_name)}\s*\(x(\d+)\)',
-            rf'{re.escape(role_name)}\s*x(\d+)'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, full_text, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
-        
-        return 1
-    
     def parse_message(self, msg, channel_name):
-        """Парсит сообщение и возвращает предметы из mention_roles с правильным количеством"""
+        """Парсит сообщение и возвращает предметы из текста с правильным количеством"""
         all_items = []  # список кортежей (item_name, quantity)
         rare_items = []  # список кортежей (item_name, quantity)
+        weather_info = None  # информация о погоде
         
-        if msg.get('mention_roles'):
-            for role_id in msg['mention_roles']:
-                role_name = self.get_role_name(role_id)
-                if role_name:
-                    qty = self.extract_quantity(msg, role_name)
-                    # Добавляем предмет с количеством
-                    all_items.append((role_name, qty))
-                    if is_allowed_for_main_channel(role_name):
-                        rare_items.append((role_name, qty))
+        # Собираем весь текст из сообщения
+        full_text = ""
+        if msg.get('content'):
+            full_text += msg['content'] + "\n"
+        if msg.get('embeds'):
+            for embed in msg['embeds']:
+                if embed.get('title'):
+                    full_text += embed['title'] + "\n"
+                if embed.get('description'):
+                    full_text += embed['description'] + "\n"
+                if embed.get('fields'):
+                    for field in embed['fields']:
+                        if field.get('name'):
+                            full_text += field['name'] + "\n"
+                        if field.get('value'):
+                            full_text += field['value'] + "\n"
         
-        return all_items, rare_items
+        logger.info(f"📄 Полный текст сообщения из канала {channel_name}: {full_text}")
+        
+        # Проверяем, есть ли в сообщении информация о погоде
+        if channel_name == 'weather':
+            for weather in WEATHER_LIST:
+                if weather in full_text.lower():
+                    # Извлекаем время окончания, если есть
+                    end_timestamp = None
+                    # Ищем время в формате "until XX:XX"
+                    time_match = re.search(r'until (\d{1,2}:\d{2})', full_text, re.IGNORECASE)
+                    if time_match:
+                        # TODO: конвертировать время в timestamp если нужно
+                        pass
+                    weather_info = self.format_weather_started_message(weather, end_timestamp)
+                    logger.info(f"🌤 Найдена информация о погоде: {weather_info}")
+                    break
+        
+        # Ищем все упоминания предметов в формате @Item (xN)
+        # Паттерн: @Item (x123) или @Item(x123)
+        pattern = r'@(\w+)\s*\(x(\d+)\)'
+        matches = re.findall(pattern, full_text)
+        
+        logger.info(f"🔍 Найдено совпадений: {matches}")
+        
+        for match in matches:
+            item_name = match[0]
+            quantity = int(match[1])
+            
+            # Проверяем, есть ли такой предмет в наших списках
+            if item_name in SEEDS_LIST or item_name in GEAR_LIST or item_name in WEATHER_LIST:
+                all_items.append((item_name, quantity))
+                if is_allowed_for_main_channel(item_name):
+                    rare_items.append((item_name, quantity))
+                logger.info(f"✅ Найден предмет: {item_name} x{quantity}")
+            else:
+                logger.info(f"⚠️ Неизвестный предмет: {item_name}")
+        
+        return all_items, rare_items, weather_info
     
     def format_channel_message(self, item_name: str, quantity: int) -> str:
         """Формат для канала (только редкие)"""
@@ -1011,11 +1033,15 @@ class DiscordListener:
     async def send_to_destinations(self, all_items, rare_items, weather_info=None, channel_name=None):
         """Отправляет данные в канал и личку (только новые)"""
         
-        if not all_items and not rare_items:
+        if not all_items and not rare_items and not weather_info:
+            logger.warning("⚠️ Нет данных для отправки")
             return
             
         # Единый update_id для всего сообщения
         update_id = str(int(time.time()))
+        
+        # Логируем полученные данные
+        logger.info(f"📦 Отправка: all_items={all_items}, rare_items={rare_items}, weather_info={weather_info}, channel={channel_name}")
         
         # 1. Отправка в основной канал (только редкие)
         if rare_items and self.main_channel_id:
@@ -1039,51 +1065,98 @@ class DiscordListener:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
         
         # 3. Отправка в личку (только предметы, на которые подписан пользователь)
-        if all_items:
+        if all_items or weather_info:
             users = get_all_users()
             if users:
                 sent_count = 0
-                for user_id in users:
-                    if user_id != ADMIN_ID:
-                        settings = self.bot.user_manager.get_user(user_id)
-                        
-                        # Проверяем, включены ли уведомления у пользователя
-                        if not settings.notifications_enabled:
-                            continue
-                        
-                        # Фильтруем предметы по настройкам пользователя
-                        user_items = []
-                        for name, qty in all_items:
-                            # Проверяем, подписан ли пользователь на этот предмет
-                            is_subscribed = False
-                            
-                            # Определяем категорию предмета и проверяем подписку
-                            if name in SEEDS_LIST:
-                                is_subscribed = settings.seeds.get(name, ItemSettings()).enabled
-                            elif name in GEAR_LIST:
-                                is_subscribed = settings.gear.get(name, ItemSettings()).enabled
-                            elif name in WEATHER_LIST:
-                                is_subscribed = settings.weather.get(name, ItemSettings()).enabled
-                            
-                            if is_subscribed and not was_item_sent_to_user(user_id, name, qty, update_id):
-                                user_items.append((name, qty))
-                        
-                        # Если есть новые предметы для этого пользователя - отправляем
-                        if user_items:
-                            # Формируем персонализированное сообщение
-                            user_message = self.format_pm_message(user_items, weather_info, channel_name)
-                            if user_message:
-                                try:
-                                    await self.bot.message_queue.queue.put((user_id, user_message, 'HTML', None))
-                                    for name, qty in user_items:
-                                        mark_item_sent_to_user(user_id, name, qty, update_id)
-                                    sent_count += 1
-                                except Exception as e:
-                                    # Игнорируем ошибки от заблокировавших бота
-                                    pass
+                skipped_no_notifications = 0
+                skipped_no_subscription = 0
+                skipped_already_sent = 0
                 
+                logger.info(f"👥 Начинаем отправку для {len(users)} пользователей")
+                
+                for user_id in users:
+                    if user_id == ADMIN_ID:
+                        continue
+                    
+                    settings = self.bot.user_manager.get_user(user_id)
+                    
+                    # Проверяем, включены ли уведомления у пользователя
+                    if not settings.notifications_enabled:
+                        skipped_no_notifications += 1
+                        logger.debug(f"⏭️ Пользователь {user_id} отключил уведомления")
+                        continue
+                    
+                    # Фильтруем предметы по настройкам пользователя
+                    user_items = []
+                    for name, qty in all_items:
+                        # Проверяем, подписан ли пользователь на этот предмет
+                        is_subscribed = False
+                        
+                        # Определяем категорию предмета и проверяем подписку
+                        if name in SEEDS_LIST:
+                            is_subscribed = settings.seeds.get(name, ItemSettings()).enabled
+                            logger.debug(f"🌱 {name}: подписка={is_subscribed}")
+                        elif name in GEAR_LIST:
+                            is_subscribed = settings.gear.get(name, ItemSettings()).enabled
+                            logger.debug(f"⚙️ {name}: подписка={is_subscribed}")
+                        elif name in WEATHER_LIST:
+                            is_subscribed = settings.weather.get(name, ItemSettings()).enabled
+                            logger.debug(f"🌤 {name}: подписка={is_subscribed}")
+                        
+                        if is_subscribed:
+                            if not was_item_sent_to_user(user_id, name, qty, update_id):
+                                user_items.append((name, qty))
+                                logger.debug(f"✅ {name} x{qty} будет отправлен пользователю {user_id}")
+                            else:
+                                skipped_already_sent += 1
+                                logger.debug(f"⏭️ {name} x{qty} уже отправлен пользователю {user_id}")
+                        else:
+                            skipped_no_subscription += 1
+                            logger.debug(f"⏭️ {name}: пользователь {user_id} не подписан")
+                    
+                    # Проверяем, подписан ли пользователь на погоду
+                    user_weather_info = None
+                    if weather_info:
+                        # Извлекаем тип погоды из weather_info
+                        weather_type = None
+                        for w in WEATHER_LIST:
+                            if w in weather_info.lower():
+                                weather_type = w
+                                break
+                        
+                        if weather_type:
+                            is_subscribed = settings.weather.get(weather_type, ItemSettings()).enabled
+                            logger.debug(f"🌤 Погода {weather_type}: подписка={is_subscribed}")
+                            
+                            if is_subscribed and not was_weather_notification_sent(weather_type, "started", update_id):
+                                user_weather_info = weather_info
+                                logger.debug(f"✅ Информация о погоде будет отправлена пользователю {user_id}")
+                            else:
+                                logger.debug(f"⏭️ Погода уже отправлена или пользователь не подписан")
+                    
+                    # Если есть новые предметы или погода для этого пользователя - отправляем
+                    if user_items or user_weather_info:
+                        # Формируем персонализированное сообщение
+                        user_message = self.format_pm_message(user_items, user_weather_info, channel_name)
+                        if user_message:
+                            try:
+                                await self.bot.message_queue.queue.put((user_id, user_message, 'HTML', None))
+                                for name, qty in user_items:
+                                    mark_item_sent_to_user(user_id, name, qty, update_id)
+                                if user_weather_info and weather_type:
+                                    # Отмечаем погоду как отправленную
+                                    mark_weather_notification_sent(weather_type, "started", update_id)
+                                sent_count += 1
+                                logger.info(f"✅ Отправлено пользователю {user_id}")
+                            except Exception as e:
+                                logger.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+                                pass
+                
+                logger.info(f"📊 Статистика отправки: отправлено={sent_count}, без уведомлений={skipped_no_notifications}, не подписаны={skipped_no_subscription}, уже отправлено={skipped_already_sent}")
                 if sent_count > 0:
-                    logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)} (по их подпискам)")
+                    items_summary = ", ".join([f"{name} x{qty}" for name, qty in all_items])
+                    logger.info(f"📦 Отправленные предметы: {items_summary}")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -1126,10 +1199,10 @@ class DiscordListener:
                             
                             if author == 'Dawnbot':
                                 logger.info(f"📨 Это Dawnbot! Парсим...")
-                                all_items, rare_items = self.parse_message(msg, channel_name)
+                                all_items, rare_items, weather_info = self.parse_message(msg, channel_name)
                                 
-                                if all_items or rare_items:
-                                    await self.send_to_destinations(all_items, rare_items, channel_name=channel_name)
+                                if all_items or rare_items or weather_info:
+                                    await self.send_to_destinations(all_items, rare_items, weather_info, channel_name)
                                 else:
                                     logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
                                 

@@ -844,7 +844,8 @@ class MessageQueue:
                 parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
-        except:
+        except Exception as e:
+            # Игнорируем ошибки от заблокировавших бота пользователей
             pass
     
     async def _send_fast(self, chat_id: int, photo: str, caption: str, parse_mode: str):
@@ -868,21 +869,31 @@ class DiscordListener:
         self.role_cache = {}
         self.running = True
         self.main_channel_id = int(MAIN_CHANNEL_ID) if MAIN_CHANNEL_ID else None
+        self.first_run = True  # Флаг первого запуска
         
+        # Загружаем сохранённые ID сообщений
+        self.load_last_messages()
+    
+    def load_last_messages(self):
+        """Загружает сохранённые ID сообщений"""
         try:
             if os.path.exists('last_discord.json'):
                 with open('last_discord.json', 'r') as f:
                     self.last_messages = json.load(f)
                 logger.info(f"📂 Загружено {len(self.last_messages)} записей из last_discord.json")
-        except:
+            else:
+                logger.info("📂 Файл last_discord.json не найден, начинаем с чистого листа")
+                self.last_messages = {}
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки last_discord.json: {e}")
             self.last_messages = {}
     
     def save_last(self):
         try:
             with open('last_discord.json', 'w') as f:
                 json.dump(self.last_messages, f, indent=2)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения last_discord.json: {e}")
     
     def get_role_name(self, role_id):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -1008,43 +1019,36 @@ class DiscordListener:
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
         
-        # 3. Отправка в личку (только выбранные пользователем предметы, одним сообщением)
+        # 3. Отправка в личку (все предметы одним сообщением)
         if all_items:
             users = get_all_users()
             if users:
-                sent_count = 0
-                for user_id in users:
-                    if user_id != ADMIN_ID:
-                        settings = self.bot.user_manager.get_user(user_id)
-                        if settings.notifications_enabled:
-                            # Фильтруем предметы по настройкам пользователя
-                            user_items = []
-                            for name, qty in all_items:
-                                if name in SEEDS_LIST and settings.seeds.get(name, ItemSettings()).enabled:
-                                    user_items.append((name, qty))
-                                elif name in GEAR_LIST and settings.gear.get(name, ItemSettings()).enabled:
-                                    user_items.append((name, qty))
-                                elif name in WEATHER_LIST and settings.weather.get(name, ItemSettings()).enabled:
-                                    user_items.append((name, qty))
-                            
-                            if user_items:
-                                # Проверяем, не отправляли ли уже
+                pm_message = self.format_pm_message(all_items, weather_info)
+                if pm_message:
+                    sent_count = 0
+                    for user_id in users:
+                        if user_id != ADMIN_ID:
+                            settings = self.bot.user_manager.get_user(user_id)
+                            if settings.notifications_enabled:
+                                # Проверяем, есть ли новые предметы для этого пользователя
                                 has_new = False
-                                for name, qty in user_items:
+                                for name, qty in all_items:
                                     if not was_item_sent_to_user(user_id, name, qty, update_id):
                                         has_new = True
                                         break
                                 
                                 if has_new:
-                                    pm_message = self.format_pm_message(user_items, weather_info)
-                                    if pm_message:
+                                    try:
                                         await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
-                                        for name, qty in user_items:
+                                        for name, qty in all_items:
                                             mark_item_sent_to_user(user_id, name, qty, update_id)
                                         sent_count += 1
-                
-                if sent_count > 0:
-                    logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)}")
+                                    except Exception as e:
+                                        # Игнорируем ошибки от заблокировавших бота
+                                        pass
+                    
+                    if sent_count > 0:
+                        logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)}")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -1071,6 +1075,12 @@ class DiscordListener:
                             
                             msg_key = f"{channel_id}_{msg_id}"
                             
+                            # Пропускаем старые сообщения при первом запуске
+                            if self.first_run:
+                                self.last_messages[msg_key] = True
+                                logger.info(f"🚀 Первый запуск, сохраняем ID {msg_id} без обработки")
+                                continue
+                            
                             if msg_key in self.last_messages:
                                 logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
                                 continue
@@ -1090,8 +1100,12 @@ class DiscordListener:
                                 self.save_last()
                             else:
                                 logger.info(f"⏭️ Не Dawnbot, пропускаем")
-                    else:
-                        logger.error(f"❌ Ошибка Discord API: {r.status_code}")
+                        
+                        # После первого цикла отключаем флаг
+                        if self.first_run:
+                            self.first_run = False
+                            self.save_last()
+                            logger.info("🚀 Первый запуск завершён, дальше только новые сообщения")
                     
                     await asyncio.sleep(1)
                 

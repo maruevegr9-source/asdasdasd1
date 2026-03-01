@@ -915,53 +915,43 @@ class DiscordListener:
         
         if msg.get('content'):
             full_text += msg['content'] + "\n"
-            logger.info(f"📝 Content: {msg['content'][:200]}")
+            logger.info(f"📝 Content: {msg['content'][:500]}")
         
         if msg.get('embeds'):
             for i, embed in enumerate(msg['embeds']):
-                logger.info(f"🖼️ Embed {i+1}:")
-                if embed.get('title'):
-                    full_text += embed['title'] + "\n"
-                    logger.info(f"   Title: {embed['title']}")
                 if embed.get('description'):
                     full_text += embed['description'] + "\n"
-                    logger.info(f"   Description: {embed['description'][:200]}")
-                if embed.get('fields'):
-                    for field in embed['fields']:
-                        full_text += f"{field.get('name', '')}: {field.get('value', '')}\n"
-                        logger.info(f"   Field: {field.get('name')} = {field.get('value')}")
+                    logger.info(f"🖼️ Embed {i+1} description: {embed['description'][:500]}")
         
         logger.info(f"📄 Полный текст для парсинга: {full_text[:500]}")
         
-        # Паттерн 1: @Beetroot (x4) - основной
-        matches = re.findall(r'@?(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
+        # Паттерн 1: @Rose (x1) - основной формат из скрина
+        matches = re.findall(r'@(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
         for name, qty in matches:
             clean_name = name.strip()
             quantities[clean_name] = int(qty)
-            logger.info(f"✅ Найдено по паттерну 1: {clean_name} x{qty}")
+            logger.info(f"✅ Найдено @-паттерн: {clean_name} x{qty}")
         
-        # Паттерн 2: для погоды "It's now @Fog!"
+        # Паттерн 2: если вдруг без @
+        if not quantities:
+            matches = re.findall(r'(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
+            for name, qty in matches:
+                # Исключаем общие слова
+                if name not in ['The', 'Seed', 'Shop', 'has', 'been', 'restocked', 'Weather', 'Update', 'Start', 'End']:
+                    clean_name = name.strip()
+                    quantities[clean_name] = int(qty)
+                    logger.info(f"✅ Найдено без @: {clean_name} x{qty}")
+        
+        # Паттерн 3: для погоды "It's now @Fog!"
         weather_match = re.search(r'now @?(\w+)!', full_text)
         if weather_match:
             weather_name = weather_match.group(1).lower()
-            if weather_name in [w.lower() for w in WEATHER_LIST]:
-                # Находим оригинальное название
-                for w in WEATHER_LIST:
-                    if w.lower() == weather_name:
-                        quantities[w] = 1
-                        logger.info(f"✅ Найдена погода: {w}")
-                        break
-        
-        # Паттерн 3: просто ищем названия предметов из списков
-        if not quantities:
-            for item in SEEDS_LIST + GEAR_LIST + WEATHER_LIST:
-                if item.lower() in full_text.lower():
-                    # Пытаемся найти количество рядом
-                    pattern = rf'{re.escape(item)}.*?(\d+)'
-                    match = re.search(pattern, full_text, re.IGNORECASE)
-                    if match:
-                        quantities[item] = int(match.group(1))
-                        logger.info(f"✅ Найдено по паттерну 3: {item} x{match.group(1)}")
+            # Приводим к правильному регистру
+            for w in WEATHER_LIST:
+                if w.lower() == weather_name:
+                    quantities[w] = 1
+                    logger.info(f"✅ Найдена погода: {w}")
+                    break
         
         logger.info(f"📊 Итого найдено предметов: {len(quantities)}")
         if quantities:

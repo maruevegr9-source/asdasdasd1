@@ -874,17 +874,15 @@ class DiscordListener:
                 with open('last_discord.json', 'r') as f:
                     self.last_messages = json.load(f)
                 logger.info(f"📂 Загружено {len(self.last_messages)} записей из last_discord.json")
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки last_discord.json: {e}")
+        except:
             self.last_messages = {}
     
     def save_last(self):
         try:
             with open('last_discord.json', 'w') as f:
                 json.dump(self.last_messages, f, indent=2)
-            logger.info(f"💾 Сохранено {len(self.last_messages)} записей в last_discord.json")
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения last_discord.json: {e}")
+        except:
+            pass
     
     def get_role_name(self, role_id):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -905,51 +903,44 @@ class DiscordListener:
             pass
         return None
     
-    def extract_quantities(self, msg):
-        """Извлекает количества предметов из сообщения"""
-        quantities = {}
-        
-        # Собираем весь текст из сообщения
+    def extract_quantity(self, msg, role_name):
+        """Извлекает количество для конкретной роли из текста"""
         full_text = ""
-        
         if msg.get('content'):
-            full_text += msg['content'] + "\n"
-            logger.info(f"📝 Content: {msg['content'][:200]}")
-        
+            full_text += msg['content']
         if msg.get('embeds'):
-            for i, embed in enumerate(msg['embeds']):
+            for embed in msg['embeds']:
                 if embed.get('description'):
-                    full_text += embed['description'] + "\n"
-                    logger.info(f"🖼️ Embed {i+1} description: {embed['description'][:200]}")
+                    full_text += embed['description']
         
-        logger.info(f"📄 Полный текст для парсинга: {full_text[:500]}")
+        # Ищем @Rose (x4) или Rose x4
+        patterns = [
+            rf'@?{re.escape(role_name)}\s*\(x(\d+)\)',
+            rf'{re.escape(role_name)}\s*x(\d+)'
+        ]
         
-        # Ищем @Rose (x1) - основной формат
-        matches = re.findall(r'@(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
-        for name, qty in matches:
-            quantities[name] = int(qty)
-            logger.info(f"✅ Найдено: {name} x{qty}")
+        for pattern in patterns:
+            match = re.search(pattern, full_text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
         
-        if not quantities:
-            logger.warning("⚠️ Ничего не найдено в сообщении!")
-        
-        return quantities
+        return 1  # если не нашли, то 1
     
     def parse_message(self, msg, channel_name):
-        """Парсит сообщение и возвращает словарь предметов с количествами"""
-        quantities = self.extract_quantities(msg)
+        """Парсит сообщение и возвращает предметы из mention_roles"""
+        all_items = []  # список кортежей (item_name, quantity)
+        rare_items = []  # список кортежей (item_name, quantity)
         
-        all_items = {}  # {item_name: quantity}
-        rare_items = {}  # {item_name: quantity}
-        
-        for item_name, qty in quantities.items():
-            all_items[item_name] = qty
-            if is_allowed_for_main_channel(item_name):
-                rare_items[item_name] = qty
-        
-        logger.info(f"📦 После фильтрации: всего {len(all_items)}, редких {len(rare_items)}")
-        if rare_items:
-            logger.info(f"   Редкие: {list(rare_items.items())}")
+        if msg.get('mention_roles'):
+            for role_id in msg['mention_roles']:
+                role_name = self.get_role_name(role_id)
+                if role_name:
+                    # Получаем количество
+                    qty = self.extract_quantity(msg, role_name)
+                    
+                    all_items.append((role_name, qty))
+                    if is_allowed_for_main_channel(role_name):
+                        rare_items.append((role_name, qty))
         
         return all_items, rare_items
     
@@ -965,7 +956,7 @@ class DiscordListener:
             f"👀 Включи уведомления в канале!"
         )
     
-    def format_pm_message(self, items: Dict[str, int], weather_info: str = None) -> str:
+    def format_pm_message(self, items: List[tuple], weather_info: str = None) -> str:
         """Формат для лички (все предметы с переводом, одним сообщением)"""
         message_parts = []
         
@@ -974,7 +965,7 @@ class DiscordListener:
         
         if items:
             msg_items = []
-            for name, qty in items.items():
+            for name, qty in items:
                 translated = translate(name)
                 msg_items.append(f"<b>{translated}:</b> {qty} шт.")
             
@@ -1001,7 +992,7 @@ class DiscordListener:
         
         # 1. Отправка в основной канал (только редкие)
         if rare_items and self.main_channel_id:
-            for item_name, qty in rare_items.items():
+            for item_name, qty in rare_items:
                 # Проверяем, не отправляли ли уже
                 if not was_item_sent_in_this_update(item_name, qty, update_id):
                     msg = self.format_channel_message(item_name, qty)
@@ -1013,7 +1004,7 @@ class DiscordListener:
         if rare_items:
             for channel in self.bot.posting_channels:
                 try:
-                    for item_name, qty in rare_items.items():
+                    for item_name, qty in rare_items:
                         if not was_item_sent_in_this_update(item_name, qty, update_id):
                             msg = self.format_channel_message(item_name, qty)
                             await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
@@ -1036,7 +1027,7 @@ class DiscordListener:
                             if settings.notifications_enabled:
                                 # Проверяем, есть ли новые предметы для этого пользователя
                                 has_new = False
-                                for item_name, qty in all_items.items():
+                                for item_name, qty in all_items:
                                     if not was_item_sent_to_user(user_id, item_name, qty, update_id):
                                         has_new = True
                                         break
@@ -1044,7 +1035,7 @@ class DiscordListener:
                                 if has_new:
                                     await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
                                     # Отмечаем все предметы как отправленные этому пользователю
-                                    for item_name, qty in all_items.items():
+                                    for item_name, qty in all_items:
                                         mark_item_sent_to_user(user_id, item_name, qty, update_id)
                                     sent_count += 1
                     
@@ -2288,7 +2279,6 @@ class GardenHorizonsBot:
             logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
         await self.message_queue.start()
-        # Удалили или закомментировали monitor_loop
         asyncio.create_task(self.discord_listener.run())
         
         await self.application.initialize()

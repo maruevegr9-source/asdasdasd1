@@ -5,15 +5,19 @@ import random
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 from dataclasses import dataclass, field
+from collections import OrderedDict
+import asyncio
+from asyncio import Semaphore
+import json
 
 import requests
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, InputMediaPhoto, ChatMember
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from telegram.constants import ParseMode
-from telegram.error import RetryAfter, TimedOut, Forbidden
+from telegram.error import RetryAfter, TimedOut, Forbidden, NetworkError
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -29,16 +33,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 
-# Новый API
 API_URL = os.getenv("API_URL", "https://stock.gardenhorizonswiki.com/stock.json")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))
 ADMIN_ID = 8025951500
+
+# НОВЫЕ НАСТРОЙКИ ДЛЯ ОПТИМИЗАЦИИ
+MAX_CONCURRENT_REQUESTS = 5  # Максимум одновременных запросов к Telegram API
+SUBSCRIPTION_CACHE_TTL = 300  # Время жизни кэша подписок (5 минут)
+BLACKLIST_CLEANUP_INTERVAL = 3600  # Очистка черного списка раз в час
 
 # Часовой пояс Москвы (UTC+3)
 MSK_TIMEZONE = timezone(timedelta(hours=3))
@@ -304,9 +313,6 @@ except Exception as e:
     logger.error(f"❌ Критическая ошибка при миграции БД: {e}", exc_info=True)
 
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ==========
-
-def get_db():
-    return sqlite3.connect(DB_PATH, timeout=30)
 
 def add_user_to_db(user_id: int, username: str = ""):
     try:
@@ -646,6 +652,29 @@ def get_stats() -> Dict:
             'user_sent_items': 0
         }
 
+# ========== ОГРАНИЧИТЕЛЬ ЗАПРОСОВ ==========
+
+class RateLimiter:
+    def __init__(self, max_calls_per_second=30):
+        self.max_calls = max_calls_per_second
+        self.calls = []
+        self.lock = asyncio.Lock()
+    
+    async def acquire(self):
+        async with self.lock:
+            now = time.time()
+            # Очищаем старые вызовы (старше 1 секунды)
+            self.calls = [t for t in self.calls if now - t < 1.0]
+            
+            if len(self.calls) >= self.max_calls:
+                # Ждем освобождения слота
+                wait_time = 1.0 - (now - self.calls[0])
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+                self.calls.pop(0)
+            
+            self.calls.append(now)
+
 # ========== КЛАССЫ ==========
 
 @dataclass
@@ -743,10 +772,12 @@ class MessageQueue:
         self.queue = asyncio.Queue()
         self._tasks = []
         self.application = None
-        self.worker_count = 50
+        # ⬇️⬇️⬇️ ОПТИМИЗИРОВАНО ⬇️⬇️⬇️
+        self.worker_count = 5  # Было 200, стало 5
         self.sent_count = 0
         self.start_time = time.time()
-        self.batch_size = 100
+        self.batch_size = 20   # Было 100, стало 20
+        self.rate_limiter = RateLimiter(max_calls_per_second=30)
     
     async def start(self):
         for i in range(self.worker_count):
@@ -767,6 +798,9 @@ class MessageQueue:
         
         while True:
             try:
+                # Контроль скорости
+                await self.rate_limiter.acquire()
+                
                 while len(batch) < self.batch_size:
                     try:
                         chat_id, text, parse_mode, photo = self.queue.get_nowait()
@@ -775,28 +809,33 @@ class MessageQueue:
                         break
                 
                 if batch:
-                    tasks = []
+                    # Отправляем последовательно, а не все сразу
                     for chat_id, text, parse_mode, photo in batch:
-                        if photo:
-                            tasks.append(self._send_fast(chat_id, photo, text, parse_mode))
-                        else:
-                            tasks.append(self._send_message_fast(chat_id, text, parse_mode))
-                    
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                        try:
+                            if photo:
+                                await self._send_fast(chat_id, photo, text, parse_mode)
+                            else:
+                                await self._send_message_fast(chat_id, text, parse_mode)
+                            
+                            # Небольшая задержка между сообщениями
+                            await asyncio.sleep(0.05)
+                            
+                        except Exception as e:
+                            logger.error(f"Ошибка отправки: {e}")
                     
                     self.sent_count += len(batch)
-                    if self.sent_count % 1000 == 0:
+                    if self.sent_count % 100 == 0:
                         elapsed = time.time() - self.start_time
-                        speed = self.sent_count / elapsed
-                        logger.warning(f"🔥 {self.sent_count} сообщений, скорость {speed:.0f} msg/сек")
+                        speed = self.sent_count / elapsed if elapsed > 0 else 0
+                        logger.info(f"📨 {self.sent_count} сообщений, скорость {speed:.1f} msg/сек")
                     
                     batch.clear()
                 
-                await asyncio.sleep(0.0001)
+                await asyncio.sleep(0.01)
                 
             except Exception as e:
                 logger.error(f"Ошибка в воркере {worker_id}: {e}")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1)
     
     async def _send_message_fast(self, chat_id: int, text: str, parse_mode: str):
         try:
@@ -806,7 +845,8 @@ class MessageQueue:
                 parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
-        except:
+        except Exception as e:
+            # Игнорируем ошибки, чтобы не засорять логи
             pass
     
     async def _send_fast(self, chat_id: int, photo: str, caption: str, parse_mode: str):
@@ -817,7 +857,7 @@ class MessageQueue:
                 caption=caption,
                 parse_mode=parse_mode
             )
-        except:
+        except Exception as e:
             pass
 
 # ========== MIDDLEWARE ==========
@@ -845,6 +885,7 @@ class SubscriptionMiddleware:
         if not channels:
             return True
         
+        # ИСПОЛЬЗУЕМ КЭШИРОВАННУЮ ПРОВЕРКУ
         is_subscribed = await self.bot.check_our_subscriptions(user.id)
         
         if not is_subscribed:
@@ -877,20 +918,20 @@ class SubscriptionMiddleware:
                         photo=IMAGE_MAIN,
                         caption=f"<b>{text}</b>",
                         parse_mode='HTML',
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                        reply_markup=InlineKeyboardMarkup(buttons)
                     )
                 elif update.callback_query:
                     try:
                         await update.callback_query.edit_message_media(
                             media=InputMediaPhoto(media=IMAGE_MAIN, caption=f"<b>{text}</b>", parse_mode='HTML'),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                            reply_markup=InlineKeyboardMarkup(buttons)
                         )
                     except:
                         await update.callback_query.message.reply_photo(
                             photo=IMAGE_MAIN,
                             caption=f"<b>{text}</b>",
                             parse_mode='HTML',
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                            reply_markup=InlineKeyboardMarkup(buttons)
                         )
             except Exception as e:
                 logger.error(f"❌ Middleware: ошибка отправки сообщения: {e}")
@@ -909,9 +950,14 @@ class GardenHorizonsBot:
         self.posting_channels = get_posting_channels()
         self.mailing_text = None
         
-        # ========== ДОБАВЛЕНО КЭШИРОВАНИЕ ПОДПИСОК ==========
-        self.subscription_cache = {}  # Кэш проверок подписок
-        self.subscription_cache_ttl = 300  # Время жизни кэша 5 минут (300 секунд)
+        # ⬇️⬇️⬇️ НОВЫЕ ОПТИМИЗАЦИИ ⬇️⬇️⬇️
+        # Кэш подписок: user_id -> (is_subscribed, timestamp)
+        self.subscription_cache = {}
+        # Черный список отписавшихся (для мгновенной блокировки)
+        self.blacklist = set()
+        self.cache_ttl = SUBSCRIPTION_CACHE_TTL  # 5 минут
+        # Семафор для ограничения одновременных запросов
+        self.request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         
         self.message_queue = MessageQueue()
         self.message_queue.application = self.application
@@ -931,7 +977,11 @@ class GardenHorizonsBot:
         self.original_process_update = self.application.process_update
         self.application.process_update = self.process_update_with_middleware
         
+        # Запускаем фоновую очистку кэша
+        asyncio.create_task(self._cleanup_cache_loop())
+        
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
+        logger.info(f"⚙️ Оптимизации: воркеров=5, кэш={SUBSCRIPTION_CACHE_TTL}с, макс_запросов={MAX_CONCURRENT_REQUESTS}")
     
     async def process_update_with_middleware(self, update: Update):
         try:
@@ -958,49 +1008,126 @@ class GardenHorizonsBot:
                 return int(identifier)
             return identifier
     
-    # ========== ОПТИМИЗИРОВАННАЯ ПРОВЕРКА ПОДПИСКИ С КЭШЕМ ==========
+    # ⬇️⬇️⬇️ ОПТИМИЗИРОВАННАЯ ПРОВЕРКА ПОДПИСКИ ⬇️⬇️⬇️
     async def check_our_subscriptions(self, user_id: int) -> bool:
-        # ОПТИМИЗАЦИЯ: админ всегда пропускается
+        # Админ всегда пропускается
         if user_id == ADMIN_ID:
             return True
         
-        # ПРОВЕРЯЕМ КЭШ
+        # ⚡ МГНОВЕННАЯ ПРОВЕРКА ЧЕРНОГО СПИСКА
+        if user_id in self.blacklist:
+            return False
+        
+        # Проверяем кэш
         current_time = time.time()
         if user_id in self.subscription_cache:
-            result, timestamp = self.subscription_cache[user_id]
-            if current_time - timestamp < self.subscription_cache_ttl:
-                return result  # Возвращаем кэшированный результат
+            is_subscribed, timestamp = self.subscription_cache[user_id]
+            # Если в кэше отписан - сразу возвращаем False
+            if not is_subscribed:
+                return False
+            # Если подписан и кэш свежий - возвращаем True
+            if current_time - timestamp < self.cache_ttl:
+                return True
         
-        # Если нет в кэше или истекло - проверяем по-настоящему
+        # Если нет в кэше или кэш устарел - проверяем по-настоящему
         channels = self.mandatory_channels
         
         if not channels:
             self.subscription_cache[user_id] = (True, current_time)
             return True
         
-        for channel in channels:
-            channel_id_str = channel['id']
+        # Используем семафор для ограничения запросов
+        async with self.request_semaphore:
+            for channel in channels:
+                try:
+                    chat_id = await self.get_chat_id_safe(channel['id'])
+                    
+                    if chat_id is None:
+                        self.subscription_cache[user_id] = (False, current_time)
+                        self.blacklist.add(user_id)  # Добавляем в черный список
+                        return False
+                    
+                    member = await self.application.bot.get_chat_member(chat_id, user_id)
+                    status = member.status
+                    
+                    if status not in ["member", "administrator", "creator", "restricted"]:
+                        self.subscription_cache[user_id] = (False, current_time)
+                        self.blacklist.add(user_id)  # Добавляем в черный список
+                        return False
+                        
+                except Exception as e:
+                    # Ошибка - считаем отписавшимся
+                    self.subscription_cache[user_id] = (False, current_time)
+                    self.blacklist.add(user_id)  # Добавляем в черный список
+                    return False
+            
+            # Подписан на все каналы
+            self.subscription_cache[user_id] = (True, current_time)
+            # Если был в черном списке - удаляем
+            if user_id in self.blacklist:
+                self.blacklist.remove(user_id)
+            return True
+    
+    # ⬇️⬇️⬇️ ПРИНУДИТЕЛЬНАЯ ПРОВЕРКА (БЕЗ КЭША) ⬇️⬇️⬇️
+    async def verify_subscription_now(self, user_id: int) -> bool:
+        """Принудительная проверка подписки (без кэша)"""
+        channels = self.mandatory_channels
+        
+        if not channels:
+            return True
+        
+        async with self.request_semaphore:
+            for channel in channels:
+                try:
+                    chat_id = await self.get_chat_id_safe(channel['id'])
+                    member = await self.application.bot.get_chat_member(chat_id, user_id)
+                    
+                    if member.status not in ["member", "administrator", "creator"]:
+                        # Обновляем кэш
+                        self.subscription_cache[user_id] = (False, time.time())
+                        self.blacklist.add(user_id)
+                        return False
+                        
+                except Exception:
+                    self.subscription_cache[user_id] = (False, time.time())
+                    self.blacklist.add(user_id)
+                    return False
+            
+            # Подписан
+            self.subscription_cache[user_id] = (True, time.time())
+            if user_id in self.blacklist:
+                self.blacklist.remove(user_id)
+            return True
+    
+    # ⬇️⬇️⬇️ ОЧИСТКА КЭША ⬇️⬇️⬇️
+    async def _cleanup_cache_loop(self):
+        """Фоновая задача для очистки устаревших записей кэша"""
+        while True:
+            await asyncio.sleep(300)  # Каждые 5 минут
             
             try:
-                chat_id = await self.get_chat_id_safe(channel_id_str)
+                current_time = time.time()
                 
-                if chat_id is None:
-                    self.subscription_cache[user_id] = (False, current_time)
-                    return False
+                # Очистка основного кэша
+                to_delete = []
+                for user_id, (_, timestamp) in self.subscription_cache.items():
+                    if current_time - timestamp > self.cache_ttl * 2:  # Старше 10 минут
+                        to_delete.append(user_id)
                 
-                member = await self.application.bot.get_chat_member(chat_id, user_id)
-                status = member.status
+                for user_id in to_delete:
+                    del self.subscription_cache[user_id]
                 
-                if status not in ["member", "administrator", "creator", "restricted"]:
-                    self.subscription_cache[user_id] = (False, current_time)
-                    return False
+                # Очистка черного списка (раз в час)
+                if int(current_time) % 3600 < 300:  # Примерно раз в час
+                    blacklist_size = len(self.blacklist)
+                    self.blacklist.clear()
+                    logger.info(f"🧹 Очищен черный список ({blacklist_size} записей)")
+                
+                if to_delete:
+                    logger.info(f"🧹 Очищено {len(to_delete)} записей из кэша подписок")
                     
             except Exception as e:
-                self.subscription_cache[user_id] = (False, current_time)
-                return False
-        
-        self.subscription_cache[user_id] = (True, current_time)
-        return True
+                logger.error(f"❌ Ошибка при очистке кэша: {e}")
     
     def setup_conversation_handlers(self):
         self.add_op_conv = ConversationHandler(
@@ -1759,7 +1886,8 @@ class GardenHorizonsBot:
             return
         
         if query.data == "check_our_sub":
-            is_subscribed = await self.check_our_subscriptions(user.id)
+            # Принудительная проверка без кэша
+            is_subscribed = await self.verify_subscription_now(user.id)
             
             if is_subscribed:
                 add_user_to_db(user.id, user.username or user.first_name)
@@ -2048,7 +2176,7 @@ class GardenHorizonsBot:
                 current_time = time.time()
                 
                 if current_time - last_check_log >= 60:
-                    logger.info(f"⏱️ Цикл мониторинга жив, проверка #{check_count}, очередь: {self.message_queue.queue.qsize()}")
+                    logger.info(f"⏱️ Цикл мониторинга жив, проверка #{check_count}, кэш: {len(self.subscription_cache)}, черный список: {len(self.blacklist)}")
                     last_check_log = current_time
                 
                 start_time = datetime.now()
@@ -2098,6 +2226,7 @@ class GardenHorizonsBot:
                     if all_items or weather_info:
                         logger.info(f"📦 Предметов в стоке: {len(all_items)}")
                         
+                        # Отправка в каналы
                         main_channel_items = {}
                         for name, qty in all_items.items():
                             if is_allowed_for_main_channel(name):
@@ -2129,12 +2258,13 @@ class GardenHorizonsBot:
                                 except Exception as e:
                                     logger.error(f"Ошибка проверки канала {channel['name']}: {e}")
                         
+                        # Отправка пользователям
                         users = get_all_users()
                         if users:
                             logger.info(f"👥 Начинаю отправку {len(users)} пользователям...")
                             users_start = time.time()
                             
-                            chunk_size = 500
+                            chunk_size = 200  # Меньше chunk для уменьшения нагрузки
                             chunks = [users[i:i+chunk_size] for i in range(0, len(users), chunk_size)]
                             
                             tasks = []
@@ -2222,6 +2352,7 @@ class GardenHorizonsBot:
         logger.info(f"📡 API: {API_URL}")
         logger.info(f"📱 Основной канал: {MAIN_CHANNEL_ID}")
         logger.info(f"👑 Админ: {ADMIN_ID}")
+        logger.info(f"⚙️ Воркеров: 5, Кэш: {SUBSCRIPTION_CACHE_TTL}с, Черный список активен")
         
         await self.application.updater.start_polling()
         

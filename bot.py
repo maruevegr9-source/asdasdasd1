@@ -924,7 +924,7 @@ class DiscordListener:
             if match:
                 return int(match.group(1))
         
-        return 1  # если не нашли, то 1
+        return 1
     
     def parse_message(self, msg, channel_name):
         """Парсит сообщение и возвращает предметы из mention_roles"""
@@ -935,9 +935,7 @@ class DiscordListener:
             for role_id in msg['mention_roles']:
                 role_name = self.get_role_name(role_id)
                 if role_name:
-                    # Получаем количество
                     qty = self.extract_quantity(msg, role_name)
-                    
                     all_items.append((role_name, qty))
                     if is_allowed_for_main_channel(role_name):
                         rare_items.append((role_name, qty))
@@ -987,13 +985,11 @@ class DiscordListener:
     async def send_to_destinations(self, all_items, rare_items, weather_info=None):
         """Отправляет данные в канал и личку (только новые)"""
         
-        # Генерируем update_id на основе времени сообщения
         update_id = str(int(time.time()))
         
         # 1. Отправка в основной канал (только редкие)
         if rare_items and self.main_channel_id:
             for item_name, qty in rare_items:
-                # Проверяем, не отправляли ли уже
                 if not was_item_sent_in_this_update(item_name, qty, update_id):
                     msg = self.format_channel_message(item_name, qty)
                     await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
@@ -1012,33 +1008,42 @@ class DiscordListener:
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
         
-        # 3. Отправка в личку (все предметы одним сообщением)
+        # 3. Отправка в личку (только выбранные пользователем предметы, одним сообщением)
         if all_items:
-            # Получаем всех пользователей
             users = get_all_users()
             if users:
-                # Формируем сообщение для лички
-                pm_message = self.format_pm_message(all_items, weather_info)
-                if pm_message:
-                    sent_count = 0
-                    for user_id in users:
-                        if user_id != ADMIN_ID:
-                            settings = self.bot.user_manager.get_user(user_id)
-                            if settings.notifications_enabled:
-                                # Проверяем, есть ли новые предметы для этого пользователя
+                sent_count = 0
+                for user_id in users:
+                    if user_id != ADMIN_ID:
+                        settings = self.bot.user_manager.get_user(user_id)
+                        if settings.notifications_enabled:
+                            # Фильтруем предметы по настройкам пользователя
+                            user_items = []
+                            for name, qty in all_items:
+                                if name in SEEDS_LIST and settings.seeds.get(name, ItemSettings()).enabled:
+                                    user_items.append((name, qty))
+                                elif name in GEAR_LIST and settings.gear.get(name, ItemSettings()).enabled:
+                                    user_items.append((name, qty))
+                                elif name in WEATHER_LIST and settings.weather.get(name, ItemSettings()).enabled:
+                                    user_items.append((name, qty))
+                            
+                            if user_items:
+                                # Проверяем, не отправляли ли уже
                                 has_new = False
-                                for item_name, qty in all_items:
-                                    if not was_item_sent_to_user(user_id, item_name, qty, update_id):
+                                for name, qty in user_items:
+                                    if not was_item_sent_to_user(user_id, name, qty, update_id):
                                         has_new = True
                                         break
                                 
                                 if has_new:
-                                    await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
-                                    # Отмечаем все предметы как отправленные этому пользователю
-                                    for item_name, qty in all_items:
-                                        mark_item_sent_to_user(user_id, item_name, qty, update_id)
-                                    sent_count += 1
-                    
+                                    pm_message = self.format_pm_message(user_items, weather_info)
+                                    if pm_message:
+                                        await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
+                                        for name, qty in user_items:
+                                            mark_item_sent_to_user(user_id, name, qty, update_id)
+                                        sent_count += 1
+                
+                if sent_count > 0:
                     logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)}")
     
     async def run(self):
@@ -1053,7 +1058,6 @@ class DiscordListener:
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
                     
-                    # Берем 5 последних сообщений
                     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
                     r = requests.get(url, headers=self.headers, timeout=5)
                     
@@ -1061,15 +1065,12 @@ class DiscordListener:
                         messages = r.json()
                         logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
                         
-                        # Перебираем все полученные сообщения (от новых к старым)
                         for msg in messages:
                             msg_id = msg['id']
                             author = msg['author']['username']
                             
-                            # Уникальный ключ для каждого сообщения в каждом канале
                             msg_key = f"{channel_id}_{msg_id}"
                             
-                            # Проверяем, не обрабатывали ли уже это сообщение
                             if msg_key in self.last_messages:
                                 logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
                                 continue
@@ -1085,7 +1086,6 @@ class DiscordListener:
                                 else:
                                     logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
                                 
-                                # Сохраняем ID обработанного сообщения
                                 self.last_messages[msg_key] = True
                                 self.save_last()
                             else:
@@ -1211,7 +1211,6 @@ class GardenHorizonsBot:
             'Expires': '0'
         })
         
-        # Discord слушатель
         self.discord_listener = DiscordListener(self)
         
         self.setup_conversation_handlers()

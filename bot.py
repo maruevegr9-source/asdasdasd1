@@ -944,7 +944,7 @@ class DiscordListener:
         return 1
     
     def parse_message(self, msg, channel_name):
-        """Парсит сообщение и возвращает предметы из mention_roles"""
+        """Парсит сообщение и возвращает предметы из mention_roles с правильным количеством"""
         all_items = []  # список кортежей (item_name, quantity)
         rare_items = []  # список кортежей (item_name, quantity)
         
@@ -953,6 +953,7 @@ class DiscordListener:
                 role_name = self.get_role_name(role_id)
                 if role_name:
                     qty = self.extract_quantity(msg, role_name)
+                    # Добавляем предмет с количеством
                     all_items.append((role_name, qty))
                     if is_allowed_for_main_channel(role_name):
                         rare_items.append((role_name, qty))
@@ -997,14 +998,15 @@ class DiscordListener:
         return "\n\n".join(message_parts) if message_parts else None
     
     def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
+        """Формат сообщения о погоде"""
         translated = translate(weather_type)
         if end_timestamp:
             try:
                 msk_time = get_msk_time_from_timestamp(end_timestamp)
-                return f"<b>🌤️ Началась погода {translated}! Активна до {msk_time} (МСК)</b>"
+                return f"<b>🌤 Активна погода:</b>\n{translated}\n━━━━━━━━━━━━━━━━\n⏰ До {msk_time} (МСК)"
             except:
-                return f"<b>🌤️ Началась погода {translated}!</b>"
-        return f"<b>🌤️ Началась погода {translated}!</b>"
+                return f"<b>🌤 Активна погода:</b>\n{translated}"
+        return f"<b>🌤 Активна погода:</b>\n{translated}"
     
     async def send_to_destinations(self, all_items, rare_items, weather_info=None, channel_name=None):
         """Отправляет данные в канал и личку (только новые)"""
@@ -1036,36 +1038,52 @@ class DiscordListener:
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
         
-        # 3. Отправка в личку (все предметы одним сообщением)
+        # 3. Отправка в личку (только предметы, на которые подписан пользователь)
         if all_items:
             users = get_all_users()
             if users:
-                pm_message = self.format_pm_message(all_items, weather_info, channel_name)
-                if pm_message:
-                    sent_count = 0
-                    for user_id in users:
-                        if user_id != ADMIN_ID:
-                            settings = self.bot.user_manager.get_user(user_id)
-                            if settings.notifications_enabled:
-                                # Проверяем, есть ли новые предметы для этого пользователя
-                                has_new = False
-                                for name, qty in all_items:
-                                    if not was_item_sent_to_user(user_id, name, qty, update_id):
-                                        has_new = True
-                                        break
-                                
-                                if has_new:
-                                    try:
-                                        await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
-                                        for name, qty in all_items:
-                                            mark_item_sent_to_user(user_id, name, qty, update_id)
-                                        sent_count += 1
-                                    except Exception as e:
-                                        # Игнорируем ошибки от заблокировавших бота
-                                        pass
-                    
-                    if sent_count > 0:
-                        logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)}")
+                sent_count = 0
+                for user_id in users:
+                    if user_id != ADMIN_ID:
+                        settings = self.bot.user_manager.get_user(user_id)
+                        
+                        # Проверяем, включены ли уведомления у пользователя
+                        if not settings.notifications_enabled:
+                            continue
+                        
+                        # Фильтруем предметы по настройкам пользователя
+                        user_items = []
+                        for name, qty in all_items:
+                            # Проверяем, подписан ли пользователь на этот предмет
+                            is_subscribed = False
+                            
+                            # Определяем категорию предмета и проверяем подписку
+                            if name in SEEDS_LIST:
+                                is_subscribed = settings.seeds.get(name, ItemSettings()).enabled
+                            elif name in GEAR_LIST:
+                                is_subscribed = settings.gear.get(name, ItemSettings()).enabled
+                            elif name in WEATHER_LIST:
+                                is_subscribed = settings.weather.get(name, ItemSettings()).enabled
+                            
+                            if is_subscribed and not was_item_sent_to_user(user_id, name, qty, update_id):
+                                user_items.append((name, qty))
+                        
+                        # Если есть новые предметы для этого пользователя - отправляем
+                        if user_items:
+                            # Формируем персонализированное сообщение
+                            user_message = self.format_pm_message(user_items, weather_info, channel_name)
+                            if user_message:
+                                try:
+                                    await self.bot.message_queue.queue.put((user_id, user_message, 'HTML', None))
+                                    for name, qty in user_items:
+                                        mark_item_sent_to_user(user_id, name, qty, update_id)
+                                    sent_count += 1
+                                except Exception as e:
+                                    # Игнорируем ошибки от заблокировавших бота
+                                    pass
+                
+                if sent_count > 0:
+                    logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)} (по их подпискам)")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -2300,9 +2318,9 @@ class GardenHorizonsBot:
                 
                 if end_timestamp and wtype in TRANSLATIONS:
                     msk_time = get_msk_time_from_timestamp(end_timestamp)
-                    parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {msk_time} (МСК)")
+                    parts.append(f"<b>🌤 Активна погода:</b>\n{translate(wtype)}\n━━━━━━━━━━━━━━━━\n⏰ До {msk_time} (МСК)")
                 elif wtype in TRANSLATIONS:
-                    parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
+                    parts.append(f"<b>🌤 Активна погода:</b>\n{translate(wtype)}")
         
         return "\n\n".join(parts) if parts else None
     

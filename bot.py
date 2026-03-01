@@ -4,13 +4,15 @@ import asyncio
 import random
 import sqlite3
 import time
+import threading
+import json
+import re
+import html
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Set, Tuple
 from dataclasses import dataclass, field
 from collections import OrderedDict
-import asyncio
 from asyncio import Semaphore
-import json
 
 import requests
 from dotenv import load_dotenv
@@ -40,14 +42,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 
+# Данные для Discord
+DISCORD_TOKEN = "MTE5ODI4NDc2NDA0MjUwNjMyMw.Gz2mps.i44drjjzSvDipjLO6UIBpgbjgJMvRKoIvxdurM"
+DISCORD_GUILD_ID = "1392614350686130198"
+DISCORD_CHANNELS = {
+    'seeds': 1474799488689377463,
+    'gear': 1474799504401236090,
+    'weather': 1474799519706255510
+}
+
 API_URL = os.getenv("API_URL", "https://stock.gardenhorizonswiki.com/stock.json")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))
 ADMIN_ID = 8025951500
 
 # НОВЫЕ НАСТРОЙКИ ДЛЯ ОПТИМИЗАЦИИ
-MAX_CONCURRENT_REQUESTS = 5  # Максимум одновременных запросов к Telegram API
-SUBSCRIPTION_CACHE_TTL = 300  # Время жизни кэша подписок (5 минут)
-BLACKLIST_CLEANUP_INTERVAL = 3600  # Очистка черного списка раз в час
+MAX_CONCURRENT_REQUESTS = 5
+SUBSCRIPTION_CACHE_TTL = 300
+BLACKLIST_CLEANUP_INTERVAL = 3600
 
 # Часовой пояс Москвы (UTC+3)
 MSK_TIMEZONE = timezone(timedelta(hours=3))
@@ -121,13 +132,10 @@ def is_allowed_for_main_channel(item_name: str) -> bool:
     return item_name in ALLOWED_CHANNEL_ITEMS
 
 def is_weather_active(weather_data: Dict) -> bool:
-    """Проверяет, активна ли погода с учетом времени окончания"""
     if not weather_data:
         return False
-    
     if not weather_data.get("active"):
         return False
-    
     end_timestamp = weather_data.get("endTimestamp")
     if end_timestamp:
         current_time = int(time.time())
@@ -135,11 +143,9 @@ def is_weather_active(weather_data: Dict) -> bool:
             return False
         else:
             return True
-    
     return True
 
 def get_msk_time_from_timestamp(timestamp: int) -> str:
-    """Конвертирует timestamp в московское время"""
     try:
         dt_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         dt_msk = dt_utc.astimezone(MSK_TIMEZONE)
@@ -148,10 +154,9 @@ def get_msk_time_from_timestamp(timestamp: int) -> str:
         logger.error(f"❌ Ошибка конвертации времени: {e}")
         return "??:??:??"
 
-# ========== ОПТИМИЗИРОВАННАЯ РАБОТА С БД ==========
+# ========== РАБОТА С БД ==========
 
 def get_db():
-    """Оптимизированное подключение к БД"""
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA cache_size=-20000")
@@ -160,7 +165,6 @@ def get_db():
     return conn
 
 def init_database():
-    """Создает все необходимые таблицы в базе данных"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -261,58 +265,7 @@ def init_database():
 
 db_initialized = init_database()
 
-# ========== МИГРАЦИЯ БАЗЫ ДАННЫХ ==========
-try:
-    conn = get_db()
-    cur = conn.cursor()
-    
-    cur.execute("PRAGMA table_info(sent_items)")
-    columns = [column[1] for column in cur.fetchall()]
-    
-    if 'update_id' not in columns:
-        logger.warning("⚠️ Таблица sent_items не содержит колонку update_id. Запускаю миграцию...")
-        
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS sent_items_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER,
-                item_name TEXT,
-                quantity INTEGER,
-                update_id TEXT,
-                sent_at TEXT,
-                UNIQUE(chat_id, item_name, quantity, update_id)
-            )
-        """)
-        
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sent_items'")
-        if cur.fetchone():
-            try:
-                cur.execute("PRAGMA table_info(sent_items)")
-                old_columns = [col[1] for col in cur.fetchall()]
-                
-                if 'update_id' in old_columns:
-                    logger.info("✅ Колонка update_id уже существует в sent_items")
-                else:
-                    cur.execute("""
-                        INSERT INTO sent_items_new (id, chat_id, item_name, quantity, sent_at)
-                        SELECT id, chat_id, item_name, quantity, sent_at FROM sent_items
-                    """)
-                    
-                    cur.execute("DROP TABLE sent_items")
-                    cur.execute("ALTER TABLE sent_items_new RENAME TO sent_items")
-            except Exception as e:
-                logger.error(f"❌ Ошибка при копировании данных: {e}")
-        else:
-            cur.execute("ALTER TABLE sent_items_new RENAME TO sent_items")
-        
-        conn.commit()
-        logger.info("✅ Миграция таблицы sent_items завершена")
-    
-    conn.close()
-except Exception as e:
-    logger.error(f"❌ Критическая ошибка при миграции БД: {e}", exc_info=True)
-
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ==========
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БД ==========
 
 def add_user_to_db(user_id: int, username: str = ""):
     try:
@@ -663,11 +616,9 @@ class RateLimiter:
     async def acquire(self):
         async with self.lock:
             now = time.time()
-            # Очищаем старые вызовы (старше 1 секунды)
             self.calls = [t for t in self.calls if now - t < 1.0]
             
             if len(self.calls) >= self.max_calls:
-                # Ждем освобождения слота
                 wait_time = 1.0 - (now - self.calls[0])
                 if wait_time > 0:
                     await asyncio.sleep(wait_time)
@@ -772,11 +723,10 @@ class MessageQueue:
         self.queue = asyncio.Queue()
         self._tasks = []
         self.application = None
-        # ⬇️⬇️⬇️ ОПТИМИЗИРОВАНО ⬇️⬇️⬇️
-        self.worker_count = 5  # Было 200, стало 5
+        self.worker_count = 5
         self.sent_count = 0
         self.start_time = time.time()
-        self.batch_size = 20   # Было 100, стало 20
+        self.batch_size = 20
         self.rate_limiter = RateLimiter(max_calls_per_second=30)
     
     async def start(self):
@@ -798,7 +748,6 @@ class MessageQueue:
         
         while True:
             try:
-                # Контроль скорости
                 await self.rate_limiter.acquire()
                 
                 while len(batch) < self.batch_size:
@@ -809,7 +758,6 @@ class MessageQueue:
                         break
                 
                 if batch:
-                    # Отправляем последовательно, а не все сразу
                     for chat_id, text, parse_mode, photo in batch:
                         try:
                             if photo:
@@ -817,7 +765,6 @@ class MessageQueue:
                             else:
                                 await self._send_message_fast(chat_id, text, parse_mode)
                             
-                            # Небольшая задержка между сообщениями
                             await asyncio.sleep(0.05)
                             
                         except Exception as e:
@@ -845,8 +792,7 @@ class MessageQueue:
                 parse_mode=parse_mode,
                 disable_web_page_preview=True
             )
-        except Exception as e:
-            # Игнорируем ошибки, чтобы не засорять логи
+        except:
             pass
     
     async def _send_fast(self, chat_id: int, photo: str, caption: str, parse_mode: str):
@@ -857,10 +803,101 @@ class MessageQueue:
                 caption=caption,
                 parse_mode=parse_mode
             )
-        except Exception as e:
+        except:
             pass
 
+# ========== DISCORD СЛУШАТЕЛЬ ==========
+
+class DiscordListener:
+    def __init__(self, telegram_bot_instance):
+        self.bot = telegram_bot_instance
+        self.headers = {'authorization': DISCORD_TOKEN}
+        self.last_messages = {}
+        self.role_cache = {}
+        self.running = True
+        self.main_channel_id = int(MAIN_CHANNEL_ID) if MAIN_CHANNEL_ID else None
+        
+        try:
+            with open('last_discord.json', 'r') as f:
+                self.last_messages = json.load(f)
+        except:
+            pass
+    
+    def save_last(self):
+        try:
+            with open('last_discord.json', 'w') as f:
+                json.dump(self.last_messages, f)
+        except:
+            pass
+    
+    def get_role_name(self, role_id):
+        if role_id in self.role_cache:
+            return self.role_cache[role_id]
+        try:
+            url = f"https://discord.com/api/v9/guilds/{DISCORD_GUILD_ID}/roles"
+            r = requests.get(url, headers=self.headers, timeout=5)
+            if r.status_code == 200:
+                roles = r.json()
+                for role in roles:
+                    self.role_cache[role['id']] = role['name']
+                    if role['id'] == str(role_id):
+                        return role['name']
+        except:
+            pass
+        return f"роль {role_id}"
+    
+    def parse_message(self, msg, channel_name):
+        items = []
+        if msg.get('mention_roles'):
+            for role_id in msg['mention_roles']:
+                role_name = self.get_role_name(role_id)
+                items.append(f"• {role_name}")
+        
+        if items:
+            return f"🌱 <b>СТОК ОБНОВИЛСЯ ({channel_name.upper()})</b>\n\n" + "\n".join(items)
+        return None
+    
+    async def send_to_telegram(self, text):
+        if self.main_channel_id and self.bot and self.bot.message_queue:
+            await self.bot.message_queue.queue.put((self.main_channel_id, text, 'HTML', None))
+            logger.info(f"📤 Отправлено из Discord в Telegram канал")
+    
+    async def run(self):
+        logger.info("🔌 Discord слушатель запущен")
+        
+        while self.running:
+            try:
+                for channel_name, channel_id in DISCORD_CHANNELS.items():
+                    url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=1"
+                    r = requests.get(url, headers=self.headers, timeout=5)
+                    
+                    if r.status_code == 200:
+                        messages = r.json()
+                        if messages:
+                            msg = messages[0]
+                            msg_id = msg['id']
+                            
+                            if self.last_messages.get(str(channel_id)) != msg_id:
+                                if msg['author']['username'] == 'Dawnbot':
+                                    text = self.parse_message(msg, channel_name)
+                                    if text:
+                                        await self.send_to_telegram(text)
+                                    self.last_messages[str(channel_id)] = msg_id
+                                    self.save_last()
+                    
+                    await asyncio.sleep(1)
+                
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                logger.error(f"❌ Discord ошибка: {e}")
+                await asyncio.sleep(30)
+    
+    def stop(self):
+        self.running = False
+
 # ========== MIDDLEWARE ==========
+
 class SubscriptionMiddleware:
     def __init__(self, bot_instance):
         self.bot = bot_instance
@@ -885,7 +922,6 @@ class SubscriptionMiddleware:
         if not channels:
             return True
         
-        # ИСПОЛЬЗУЕМ КЭШИРОВАННУЮ ПРОВЕРКУ
         is_subscribed = await self.bot.check_our_subscriptions(user.id)
         
         if not is_subscribed:
@@ -950,13 +986,10 @@ class GardenHorizonsBot:
         self.posting_channels = get_posting_channels()
         self.mailing_text = None
         
-        # ⬇️⬇️⬇️ НОВЫЕ ОПТИМИЗАЦИИ ⬇️⬇️⬇️
-        # Кэш подписок: user_id -> (is_subscribed, timestamp)
+        # Оптимизации
         self.subscription_cache = {}
-        # Черный список отписавшихся (для мгновенной блокировки)
         self.blacklist = set()
-        self.cache_ttl = SUBSCRIPTION_CACHE_TTL  # 5 минут
-        # Семафор для ограничения одновременных запросов
+        self.cache_ttl = SUBSCRIPTION_CACHE_TTL
         self.request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         
         self.message_queue = MessageQueue()
@@ -970,6 +1003,9 @@ class GardenHorizonsBot:
             'Expires': '0'
         })
         
+        # Discord слушатель
+        self.discord_listener = DiscordListener(self)
+        
         self.setup_conversation_handlers()
         self.setup_handlers()
         
@@ -977,11 +1013,10 @@ class GardenHorizonsBot:
         self.original_process_update = self.application.process_update
         self.application.process_update = self.process_update_with_middleware
         
-        # Запускаем фоновую очистку кэша
         asyncio.create_task(self._cleanup_cache_loop())
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
-        logger.info(f"⚙️ Оптимизации: воркеров=5, кэш={SUBSCRIPTION_CACHE_TTL}с, макс_запросов={MAX_CONCURRENT_REQUESTS}")
+        logger.info(f"⚙️ Оптимизации: воркеров=5, кэш={SUBSCRIPTION_CACHE_TTL}с")
     
     async def process_update_with_middleware(self, update: Update):
         try:
@@ -1008,35 +1043,27 @@ class GardenHorizonsBot:
                 return int(identifier)
             return identifier
     
-    # ⬇️⬇️⬇️ ОПТИМИЗИРОВАННАЯ ПРОВЕРКА ПОДПИСКИ ⬇️⬇️⬇️
     async def check_our_subscriptions(self, user_id: int) -> bool:
-        # Админ всегда пропускается
         if user_id == ADMIN_ID:
             return True
         
-        # ⚡ МГНОВЕННАЯ ПРОВЕРКА ЧЕРНОГО СПИСКА
         if user_id in self.blacklist:
             return False
         
-        # Проверяем кэш
         current_time = time.time()
         if user_id in self.subscription_cache:
             is_subscribed, timestamp = self.subscription_cache[user_id]
-            # Если в кэше отписан - сразу возвращаем False
             if not is_subscribed:
                 return False
-            # Если подписан и кэш свежий - возвращаем True
             if current_time - timestamp < self.cache_ttl:
                 return True
         
-        # Если нет в кэше или кэш устарел - проверяем по-настоящему
         channels = self.mandatory_channels
         
         if not channels:
             self.subscription_cache[user_id] = (True, current_time)
             return True
         
-        # Используем семафор для ограничения запросов
         async with self.request_semaphore:
             for channel in channels:
                 try:
@@ -1044,7 +1071,7 @@ class GardenHorizonsBot:
                     
                     if chat_id is None:
                         self.subscription_cache[user_id] = (False, current_time)
-                        self.blacklist.add(user_id)  # Добавляем в черный список
+                        self.blacklist.add(user_id)
                         return False
                     
                     member = await self.application.bot.get_chat_member(chat_id, user_id)
@@ -1052,25 +1079,20 @@ class GardenHorizonsBot:
                     
                     if status not in ["member", "administrator", "creator", "restricted"]:
                         self.subscription_cache[user_id] = (False, current_time)
-                        self.blacklist.add(user_id)  # Добавляем в черный список
+                        self.blacklist.add(user_id)
                         return False
                         
                 except Exception as e:
-                    # Ошибка - считаем отписавшимся
                     self.subscription_cache[user_id] = (False, current_time)
-                    self.blacklist.add(user_id)  # Добавляем в черный список
+                    self.blacklist.add(user_id)
                     return False
             
-            # Подписан на все каналы
             self.subscription_cache[user_id] = (True, current_time)
-            # Если был в черном списке - удаляем
             if user_id in self.blacklist:
                 self.blacklist.remove(user_id)
             return True
     
-    # ⬇️⬇️⬇️ ПРИНУДИТЕЛЬНАЯ ПРОВЕРКА (БЕЗ КЭША) ⬇️⬇️⬇️
     async def verify_subscription_now(self, user_id: int) -> bool:
-        """Принудительная проверка подписки (без кэша)"""
         channels = self.mandatory_channels
         
         if not channels:
@@ -1083,7 +1105,6 @@ class GardenHorizonsBot:
                     member = await self.application.bot.get_chat_member(chat_id, user_id)
                     
                     if member.status not in ["member", "administrator", "creator"]:
-                        # Обновляем кэш
                         self.subscription_cache[user_id] = (False, time.time())
                         self.blacklist.add(user_id)
                         return False
@@ -1093,32 +1114,27 @@ class GardenHorizonsBot:
                     self.blacklist.add(user_id)
                     return False
             
-            # Подписан
             self.subscription_cache[user_id] = (True, time.time())
             if user_id in self.blacklist:
                 self.blacklist.remove(user_id)
             return True
     
-    # ⬇️⬇️⬇️ ОЧИСТКА КЭША ⬇️⬇️⬇️
     async def _cleanup_cache_loop(self):
-        """Фоновая задача для очистки устаревших записей кэша"""
         while True:
-            await asyncio.sleep(300)  # Каждые 5 минут
+            await asyncio.sleep(300)
             
             try:
                 current_time = time.time()
                 
-                # Очистка основного кэша
                 to_delete = []
                 for user_id, (_, timestamp) in self.subscription_cache.items():
-                    if current_time - timestamp > self.cache_ttl * 2:  # Старше 10 минут
+                    if current_time - timestamp > self.cache_ttl * 2:
                         to_delete.append(user_id)
                 
                 for user_id in to_delete:
                     del self.subscription_cache[user_id]
                 
-                # Очистка черного списка (раз в час)
-                if int(current_time) % 3600 < 300:  # Примерно раз в час
+                if int(current_time) % 3600 < 300:
                     blacklist_size = len(self.blacklist)
                     self.blacklist.clear()
                     logger.info(f"🧹 Очищен черный список ({blacklist_size} записей)")
@@ -1886,7 +1902,6 @@ class GardenHorizonsBot:
             return
         
         if query.data == "check_our_sub":
-            # Принудительная проверка без кэша
             is_subscribed = await self.verify_subscription_now(user.id)
             
             if is_subscribed:
@@ -1968,7 +1983,11 @@ class GardenHorizonsBot:
             return
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         user = update.effective_user
+        if not user:
+            return
         text = update.message.text
         
         if any(key in context.user_data for key in ['op_channel_id', 'post_channel_id', 'mailing_text']):
@@ -2226,7 +2245,6 @@ class GardenHorizonsBot:
                     if all_items or weather_info:
                         logger.info(f"📦 Предметов в стоке: {len(all_items)}")
                         
-                        # Отправка в каналы
                         main_channel_items = {}
                         for name, qty in all_items.items():
                             if is_allowed_for_main_channel(name):
@@ -2258,13 +2276,12 @@ class GardenHorizonsBot:
                                 except Exception as e:
                                     logger.error(f"Ошибка проверки канала {channel['name']}: {e}")
                         
-                        # Отправка пользователям
                         users = get_all_users()
                         if users:
                             logger.info(f"👥 Начинаю отправку {len(users)} пользователям...")
                             users_start = time.time()
                             
-                            chunk_size = 200  # Меньше chunk для уменьшения нагрузки
+                            chunk_size = 200
                             chunks = [users[i:i+chunk_size] for i in range(0, len(users), chunk_size)]
                             
                             tasks = []
@@ -2295,7 +2312,6 @@ class GardenHorizonsBot:
         
         for user_id in users:
             try:
-                # ИСПОЛЬЗУЕМ КЭШИРОВАННУЮ ПРОВЕРКУ ПОДПИСКИ
                 if user_id != ADMIN_ID:
                     if not await self.check_our_subscriptions(user_id):
                         continue
@@ -2343,7 +2359,12 @@ class GardenHorizonsBot:
             logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
         await self.message_queue.start()
+        
+        # Запускаем мониторинг API
         asyncio.create_task(self.monitor_loop())
+        
+        # Запускаем Discord слушатель
+        asyncio.create_task(self.discord_listener.run())
         
         await self.application.initialize()
         await self.application.start()
@@ -2352,7 +2373,7 @@ class GardenHorizonsBot:
         logger.info(f"📡 API: {API_URL}")
         logger.info(f"📱 Основной канал: {MAIN_CHANNEL_ID}")
         logger.info(f"👑 Админ: {ADMIN_ID}")
-        logger.info(f"⚙️ Воркеров: 5, Кэш: {SUBSCRIPTION_CACHE_TTL}с, Черный список активен")
+        logger.info(f"🔌 Discord слушатель: активен")
         
         await self.application.updater.start_polling()
         

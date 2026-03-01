@@ -117,7 +117,6 @@ TRANSLATIONS = {
     "storm": "⛈️ Шторм", "sandstorm": "🏜️ Песчаная буря", "starfall": "⭐ Звездопад"
 }
 
-# Убрали Trowel из ALLOWED_CHANNEL_ITEMS
 ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
 SEEDS_LIST = ["Carrot", "Corn", "Onion", "Strawberry", "Mushroom", "Beetroot", "Tomato", "Apple", "Rose", "Wheat", "Banana", "Plum", "Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
 GEAR_LIST = ["Watering Can", "Basic Sprinkler", "Harvest Bell", "Turbo Sprinkler", "Favorite Tool", "Super Sprinkler", "Trowel"]
@@ -906,33 +905,54 @@ class DiscordListener:
         """Извлекает количества предметов из сообщения"""
         quantities = {}
         
-        # Проверяем embed'ы
+        # Собираем весь текст из сообщения
+        full_text = ""
+        
+        if msg.get('content'):
+            full_text += msg['content'] + "\n"
+        
         if msg.get('embeds'):
             for embed in msg['embeds']:
+                if embed.get('title'):
+                    full_text += embed['title'] + "\n"
                 if embed.get('description'):
-                    desc = embed['description']
-                    # Ищем паттерны @Role (x5) или Role x5
-                    matches = re.findall(r'(?:<@&(\d+)>|(\w+(?:\s+\w+)?))\s*\(?x(\d+)\)?', desc, re.IGNORECASE)
-                    for role_id, name, qty in matches:
-                        if role_id:
-                            role_name = self.get_role_name(role_id)
-                            if role_name:
-                                quantities[role_name] = int(qty)
-                        elif name:
-                            quantities[name] = int(qty)
+                    full_text += embed['description'] + "\n"
+                if embed.get('fields'):
+                    for field in embed['fields']:
+                        full_text += f"{field.get('name', '')}: {field.get('value', '')}\n"
         
-        # Проверяем обычный текст
-        if msg.get('content'):
-            content = msg['content']
-            matches = re.findall(r'(?:<@&(\d+)>|(\w+(?:\s+\w+)?))\s*\(?x(\d+)\)?', content, re.IGNORECASE)
-            for role_id, name, qty in matches:
-                if role_id:
-                    role_name = self.get_role_name(role_id)
-                    if role_name:
-                        quantities[role_name] = int(qty)
-                elif name:
+        logger.info(f"📄 Полный текст сообщения: {full_text[:200]}...")
+        
+        # Паттерн 1: @Cherry (x1)
+        matches = re.findall(r'@?(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text, re.IGNORECASE)
+        for name, qty in matches:
+            quantities[name] = int(qty)
+            logger.info(f"✅ Паттерн 1: {name} x{qty}")
+        
+        # Паттерн 2: Cherry x1
+        if not quantities:
+            matches = re.findall(r'(\w+(?:\s+\w+)?)\s+x(\d+)', full_text, re.IGNORECASE)
+            for name, qty in matches:
+                if name.lower() not in ['the', 'shop', 'has', 'been', 'restocked', 'restocks', 'every', 'minutes', 'seed', 'gear']:
                     quantities[name] = int(qty)
+                    logger.info(f"✅ Паттерн 2: {name} x{qty}")
         
+        # Паттерн 3: Ищем по спискам известных предметов
+        if not quantities:
+            for item in SEEDS_LIST + GEAR_LIST + WEATHER_LIST:
+                # Ищем "Item: 5" или "Item 5"
+                patterns = [
+                    rf'{re.escape(item)}[:\s]+(\d+)',
+                    rf'{re.escape(item)}.*?(\d+)',
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, full_text, re.IGNORECASE)
+                    if match:
+                        quantities[item] = int(match.group(1))
+                        logger.info(f"✅ Паттерн 3: {item} x{match.group(1)}")
+                        break
+        
+        logger.info(f"📊 Итого найдено предметов: {len(quantities)}")
         return quantities
     
     def parse_message(self, msg, channel_name):
@@ -947,6 +967,7 @@ class DiscordListener:
             if is_allowed_for_main_channel(item_name):
                 rare_items[item_name] = qty
         
+        logger.info(f"📦 После фильтрации: всего {len(all_items)}, редких {len(rare_items)}")
         return all_items, rare_items
     
     def format_channel_message(self, item_name: str, quantity: int) -> str:
@@ -2260,17 +2281,6 @@ class GardenHorizonsBot:
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
         
         return "\n\n".join(parts) if parts else None
-    
-    def format_channel_message(self, item_name: str, quantity: int) -> str:
-        translated = translate(item_name)
-        return (
-            f"✨ <b>{translated}</b>\n"
-            f"📦 <b>Количество:</b> {quantity} шт.\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"<a href='{DEFAULT_REQUIRED_CHANNEL_LINK}'>📢 Наш канал</a> | <a href='{BOT_LINK}'>🤖 Авто-сток</a> | <a href='{CHAT_LINK}'>💬 Наш чат</a>\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"👀 Включи уведомления в канале!"
-        )
     
     def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
         translated = translate(weather_type)

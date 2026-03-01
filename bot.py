@@ -2269,7 +2269,6 @@ class GardenHorizonsBot:
             logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
         await self.message_queue.start()
-        asyncio.create_task(self.monitor_loop())
         asyncio.create_task(self.discord_listener.run())
         
         await self.application.initialize()

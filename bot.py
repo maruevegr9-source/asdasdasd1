@@ -112,15 +112,16 @@ TRANSLATIONS = {
     "Watering Can": "💧 Лейка", "Basic Sprinkler": "💦 Простой разбрызгиватель",
     "Harvest Bell": "🔔 Колокол сбора", "Turbo Sprinkler": "⚡ Турбо-разбрызгиватель",
     "Favorite Tool": "⭐ Любимый инструмент", "Super Sprinkler": "💎 Супер-разбрызгиватель",
+    "Trowel": "🪓 Лопатка",
     "fog": "🌫️ Туман", "rain": "🌧️ Дождь", "snow": "❄️ Снег",
     "storm": "⛈️ Шторм", "sandstorm": "🏜️ Песчаная буря", "starfall": "⭐ Звездопад"
 }
 
-ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
+ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry", "Mango", "Bamboo", "Trowel"]
 SEEDS_LIST = ["Carrot", "Corn", "Onion", "Strawberry", "Mushroom", "Beetroot", "Tomato", "Apple", "Rose", "Wheat", "Banana", "Plum", "Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
-GEAR_LIST = ["Watering Can", "Basic Sprinkler", "Harvest Bell", "Turbo Sprinkler", "Favorite Tool", "Super Sprinkler"]
+GEAR_LIST = ["Watering Can", "Basic Sprinkler", "Harvest Bell", "Turbo Sprinkler", "Favorite Tool", "Super Sprinkler", "Trowel"]
 WEATHER_LIST = ["fog", "rain", "snow", "storm", "sandstorm", "starfall"]
-RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall", "Mango", "Bamboo"]
+RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall", "Mango", "Bamboo", "Trowel"]
 
 def translate(text: str) -> str:
     return TRANSLATIONS.get(text, text)
@@ -900,19 +901,67 @@ class DiscordListener:
             pass
         return None
     
-    def format_channel_message(self, item_name: str, quantity: int = None) -> str:
+    def extract_quantities(self, msg):
+        """Извлекает количества предметов из сообщения"""
+        quantities = {}
+        
+        # Проверяем embed'ы
+        if msg.get('embeds'):
+            for embed in msg['embeds']:
+                if embed.get('description'):
+                    desc = embed['description']
+                    # Ищем паттерны @Role (x5) или Role x5
+                    matches = re.findall(r'(?:<@&(\d+)>|(\w+(?:\s+\w+)?))\s*\(?x(\d+)\)?', desc, re.IGNORECASE)
+                    for role_id, name, qty in matches:
+                        if role_id:
+                            role_name = self.get_role_name(role_id)
+                            if role_name:
+                                quantities[role_name] = int(qty)
+                        elif name:
+                            quantities[name] = int(qty)
+        
+        # Проверяем обычный текст
+        if msg.get('content'):
+            content = msg['content']
+            matches = re.findall(r'(?:<@&(\d+)>|(\w+(?:\s+\w+)?))\s*\(?x(\d+)\)?', content, re.IGNORECASE)
+            for role_id, name, qty in matches:
+                if role_id:
+                    role_name = self.get_role_name(role_id)
+                    if role_name:
+                        quantities[role_name] = int(qty)
+                elif name:
+                    quantities[name] = int(qty)
+        
+        return quantities
+    
+    def parse_message(self, msg, channel_name):
+        """Парсит сообщение и возвращает словарь предметов с количествами"""
+        quantities = self.extract_quantities(msg)
+        
+        all_items = {}  # {item_name: quantity}
+        rare_items = {}  # {item_name: quantity}
+        
+        for item_name, qty in quantities.items():
+            all_items[item_name] = qty
+            if is_allowed_for_main_channel(item_name):
+                rare_items[item_name] = qty
+        
+        return all_items, rare_items
+    
+    def format_channel_message(self, item_name: str, quantity: int) -> str:
+        """Формат для канала (только редкие)"""
         translated = translate(item_name)
-        quantity_text = f"📦 Количество: {quantity} шт.\n" if quantity else ""
         return (
-            f"✨ {translated}\n"
-            f"{quantity_text}"
+            f"✨ <b>{translated}</b>\n"
+            f"📦 <b>Количество:</b> {quantity} шт.\n"
             f"━━━━━━━━━━━━━━\n"
             f"<a href='{DEFAULT_REQUIRED_CHANNEL_LINK}'>📢 Наш канал</a> | <a href='{BOT_LINK}'>🤖 Авто-сток</a> | <a href='{CHAT_LINK}'>💬 Наш чат</a>\n"
             f"━━━━━━━━━━━━━━\n"
             f"👀 Включи уведомления в канале!"
         )
     
-    def format_pm_message(self, items: List[tuple], weather_info: str = None) -> str:
+    def format_pm_message(self, items: Dict[str, int], weather_info: str = None) -> str:
+        """Формат для лички (все предметы с переводом, одним сообщением)"""
         message_parts = []
         
         if weather_info:
@@ -920,53 +969,67 @@ class DiscordListener:
         
         if items:
             msg_items = []
-            for name, qty in items:
+            for name, qty in items.items():
                 translated = translate(name)
-                msg_items.append(f"{translated}: {qty} шт.")
+                msg_items.append(f"<b>{translated}:</b> {qty} шт.")
             
             if msg_items:
-                message_parts.append("🔔 НОВЫЕ ПРЕДМЕТЫ В СТОКЕ\n\n" + "\n".join(msg_items))
+                message_parts.append("🔔 <b>НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n\n" + "\n".join(msg_items))
         
         return "\n\n".join(message_parts) if message_parts else None
     
-    def parse_message(self, msg, channel_name):
-        all_items = []
-        rare_items = []
-        
-        if msg.get('mention_roles'):
-            for role_id in msg['mention_roles']:
-                role_name = self.get_role_name(role_id)
-                if role_name:
-                    all_items.append((role_name, 1))
-                    if is_allowed_for_main_channel(role_name):
-                        rare_items.append((role_name, 1))
-        
-        return all_items, rare_items
-    
     async def send_to_destinations(self, all_items, rare_items, weather_info=None):
+        """Отправляет данные в канал и личку (только новые)"""
+        
+        # Генерируем update_id на основе времени сообщения
+        update_id = str(int(time.time()))
+        
+        # 1. Отправка в канал (только редкие)
         if rare_items and self.main_channel_id:
-            for item_name, qty in rare_items:
-                msg = self.format_channel_message(item_name, qty)
-                await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
-                logger.info(f"📤 Редкий предмет в канал: {item_name}")
+            for item_name, qty in rare_items.items():
+                # Проверяем, не отправляли ли уже
+                if not was_item_sent_in_this_update(item_name, qty, update_id):
+                    msg = self.format_channel_message(item_name, qty)
+                    await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
+                    mark_item_sent_for_update(item_name, qty, update_id)
+                    logger.info(f"📤 Редкий предмет в канал: {item_name} x{qty}")
         
+        # 2. Отправка в личку (все предметы одним сообщением)
         if all_items:
-            pm_message = self.format_pm_message(all_items, weather_info)
-            if pm_message:
-                users = get_all_users()
-                for user_id in users:
-                    if user_id != ADMIN_ID:
-                        settings = self.bot.user_manager.get_user(user_id)
-                        if settings.notifications_enabled:
-                            await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
-                logger.info(f"📤 Отправлено {len(users)} пользователям")
+            # Проверяем, есть ли вообще что-то новое для пользователей
+            users = get_all_users()
+            if users:
+                pm_message = self.format_pm_message(all_items, weather_info)
+                if pm_message:
+                    for user_id in users:
+                        if user_id != ADMIN_ID:
+                            settings = self.bot.user_manager.get_user(user_id)
+                            if settings.notifications_enabled:
+                                # Проверяем, не отправляли ли уже этот апдейт пользователю
+                                # В идеале нужно проверять по каждому предмету, но для простоты будем считать,
+                                # что если есть новые предметы, отправляем всё одним сообщением
+                                has_new = False
+                                for item_name, qty in all_items.items():
+                                    if not was_item_sent_to_user(user_id, item_name, qty, update_id):
+                                        has_new = True
+                                        break
+                                
+                                if has_new:
+                                    await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
+                                    # Отмечаем все предметы как отправленные этому пользователю
+                                    for item_name, qty in all_items.items():
+                                        mark_item_sent_to_user(user_id, item_name, qty, update_id)
+                    
+                    logger.info(f"📤 Отправлено {len(users)} пользователям")
         
+        # 3. Отправка в каналы автопостинга (только редкие)
         if rare_items:
             for channel in self.bot.posting_channels:
                 try:
-                    for item_name, qty in rare_items:
-                        msg = self.format_channel_message(item_name, qty)
-                        await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
+                    for item_name, qty in rare_items.items():
+                        if not was_item_sent_in_this_update(item_name, qty, update_id):
+                            msg = self.format_channel_message(item_name, qty)
+                            await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
     
@@ -989,6 +1052,7 @@ class DiscordListener:
                             msg = messages[0]
                             msg_id = msg['id']
                             
+                            # Проверяем, не обрабатывали ли уже это сообщение
                             if self.last_messages.get(str(channel_id)) != msg_id:
                                 if msg['author']['username'] == 'Dawnbot':
                                     all_items, rare_items = self.parse_message(msg, channel_name)

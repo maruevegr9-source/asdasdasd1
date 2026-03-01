@@ -870,17 +870,21 @@ class DiscordListener:
         self.main_channel_id = int(MAIN_CHANNEL_ID) if MAIN_CHANNEL_ID else None
         
         try:
-            with open('last_discord.json', 'r') as f:
-                self.last_messages = json.load(f)
-        except:
-            pass
+            if os.path.exists('last_discord.json'):
+                with open('last_discord.json', 'r') as f:
+                    self.last_messages = json.load(f)
+                logger.info(f"📂 Загружено {len(self.last_messages)} записей из last_discord.json")
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки last_discord.json: {e}")
+            self.last_messages = {}
     
     def save_last(self):
         try:
             with open('last_discord.json', 'w') as f:
-                json.dump(self.last_messages, f)
-        except:
-            pass
+                json.dump(self.last_messages, f, indent=2)
+            logger.info(f"💾 Сохранено {len(self.last_messages)} записей в last_discord.json")
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения last_discord.json: {e}")
     
     def get_role_name(self, role_id):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -910,17 +914,24 @@ class DiscordListener:
         
         if msg.get('content'):
             full_text += msg['content'] + "\n"
+            logger.info(f"📝 Content: {msg['content'][:200]}")
         
         if msg.get('embeds'):
-            for embed in msg['embeds']:
+            for i, embed in enumerate(msg['embeds']):
                 if embed.get('description'):
                     full_text += embed['description'] + "\n"
+                    logger.info(f"🖼️ Embed {i+1} description: {embed['description'][:200]}")
         
-        # Ищем @Rose (x1)
+        logger.info(f"📄 Полный текст для парсинга: {full_text[:500]}")
+        
+        # Ищем @Rose (x1) - основной формат
         matches = re.findall(r'@(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
         for name, qty in matches:
             quantities[name] = int(qty)
             logger.info(f"✅ Найдено: {name} x{qty}")
+        
+        if not quantities:
+            logger.warning("⚠️ Ничего не найдено в сообщении!")
         
         return quantities
     
@@ -935,6 +946,10 @@ class DiscordListener:
             all_items[item_name] = qty
             if is_allowed_for_main_channel(item_name):
                 rare_items[item_name] = qty
+        
+        logger.info(f"📦 После фильтрации: всего {len(all_items)}, редких {len(rare_items)}")
+        if rare_items:
+            logger.info(f"   Редкие: {list(rare_items.items())}")
         
         return all_items, rare_items
     
@@ -1055,7 +1070,7 @@ class DiscordListener:
                         messages = r.json()
                         logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
                         
-                        # Перебираем все полученные сообщения
+                        # Перебираем все полученные сообщения (от новых к старым)
                         for msg in messages:
                             msg_id = msg['id']
                             author = msg['author']['username']
@@ -1076,12 +1091,16 @@ class DiscordListener:
                                 
                                 if all_items or rare_items:
                                     await self.send_to_destinations(all_items, rare_items)
+                                else:
+                                    logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
                                 
                                 # Сохраняем ID обработанного сообщения
                                 self.last_messages[msg_key] = True
                                 self.save_last()
                             else:
                                 logger.info(f"⏭️ Не Dawnbot, пропускаем")
+                    else:
+                        logger.error(f"❌ Ошибка Discord API: {r.status_code}")
                     
                     await asyncio.sleep(1)
                 
@@ -2269,6 +2288,7 @@ class GardenHorizonsBot:
             logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
         await self.message_queue.start()
+        # Удалили или закомментировали monitor_loop
         asyncio.create_task(self.discord_listener.run())
         
         await self.application.initialize()

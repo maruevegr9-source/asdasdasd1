@@ -869,18 +869,23 @@ class DiscordListener:
         self.running = True
         self.main_channel_id = int(MAIN_CHANNEL_ID) if MAIN_CHANNEL_ID else None
         
+        # Загружаем сохранённые ID сообщений
         try:
-            with open('last_discord.json', 'r') as f:
-                self.last_messages = json.load(f)
-        except:
-            pass
+            if os.path.exists('last_discord.json'):
+                with open('last_discord.json', 'r') as f:
+                    self.last_messages = json.load(f)
+                logger.info(f"📂 Загружено {len(self.last_messages)} записей из last_discord.json")
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки last_discord.json: {e}")
+            self.last_messages = {}
     
     def save_last(self):
         try:
             with open('last_discord.json', 'w') as f:
-                json.dump(self.last_messages, f)
-        except:
-            pass
+                json.dump(self.last_messages, f, indent=2)
+            logger.info(f"💾 Сохранено {len(self.last_messages)} записей в last_discord.json")
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения last_discord.json: {e}")
     
     def get_role_name(self, role_id):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -1069,7 +1074,7 @@ class DiscordListener:
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
                     
-                    # Берем 5 последних сообщений, чтобы не пропустить новые
+                    # Берем 5 последних сообщений
                     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
                     r = requests.get(url, headers=self.headers, timeout=5)
                     
@@ -1084,7 +1089,7 @@ class DiscordListener:
                             msg_id = msg['id']
                             author = msg['author']['username']
                             
-                            # Создаем уникальный ключ для каждого сообщения
+                            # Уникальный ключ для каждого сообщения в каждом канале
                             msg_key = f"{channel_id}_{msg_id}"
                             
                             # Проверяем, не обрабатывали ли уже это сообщение
@@ -1092,13 +1097,11 @@ class DiscordListener:
                                 logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
                                 continue
                             
-                            logger.info(f"🆕 Новое сообщение от {author}, ID: {msg_id}")
+                            logger.info(f"🆕 НОВОЕ сообщение от {author}, ID: {msg_id}")
                             
                             if author == 'Dawnbot':
                                 logger.info(f"📨 Это Dawnbot! Парсим...")
                                 all_items, rare_items = self.parse_message(msg, channel_name)
-                                
-                                logger.info(f"📦 Найдено предметов: всего {len(all_items)}, редких {len(rare_items)}")
                                 
                                 if all_items or rare_items:
                                     await self.send_to_destinations(all_items, rare_items)

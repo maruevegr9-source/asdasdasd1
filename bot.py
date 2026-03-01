@@ -117,11 +117,12 @@ TRANSLATIONS = {
     "storm": "⛈️ Шторм", "sandstorm": "🏜️ Песчаная буря", "starfall": "⭐ Звездопад"
 }
 
-ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry", "Mango", "Bamboo", "Trowel"]
+# Убрали Trowel из ALLOWED_CHANNEL_ITEMS
+ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
 SEEDS_LIST = ["Carrot", "Corn", "Onion", "Strawberry", "Mushroom", "Beetroot", "Tomato", "Apple", "Rose", "Wheat", "Banana", "Plum", "Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
 GEAR_LIST = ["Watering Can", "Basic Sprinkler", "Harvest Bell", "Turbo Sprinkler", "Favorite Tool", "Super Sprinkler", "Trowel"]
 WEATHER_LIST = ["fog", "rain", "snow", "storm", "sandstorm", "starfall"]
-RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall", "Mango", "Bamboo", "Trowel"]
+RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall", "Mango", "Bamboo"]
 
 def translate(text: str) -> str:
     return TRANSLATIONS.get(text, text)
@@ -984,7 +985,7 @@ class DiscordListener:
         # Генерируем update_id на основе времени сообщения
         update_id = str(int(time.time()))
         
-        # 1. Отправка в канал (только редкие)
+        # 1. Отправка в основной канал (только редкие)
         if rare_items and self.main_channel_id:
             for item_name, qty in rare_items.items():
                 # Проверяем, не отправляли ли уже
@@ -992,7 +993,7 @@ class DiscordListener:
                     msg = self.format_channel_message(item_name, qty)
                     await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
                     mark_item_sent_for_update(item_name, qty, update_id)
-                    logger.info(f"📤 Редкий предмет в канал: {item_name} x{qty}")
+                    logger.info(f"📤 Редкий предмет в основной канал: {item_name} x{qty}")
         
         # 2. Отправка в каналы автопостинга (только редкие)
         if rare_items:
@@ -1002,6 +1003,7 @@ class DiscordListener:
                         if not was_item_sent_in_this_update(item_name, qty, update_id):
                             msg = self.format_channel_message(item_name, qty)
                             await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
+                            logger.info(f"📤 Редкий предмет в канал автопостинга {channel['name']}: {item_name} x{qty}")
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
         
@@ -1013,6 +1015,7 @@ class DiscordListener:
                 # Формируем сообщение для лички
                 pm_message = self.format_pm_message(all_items, weather_info)
                 if pm_message:
+                    sent_count = 0
                     for user_id in users:
                         if user_id != ADMIN_ID:
                             settings = self.bot.user_manager.get_user(user_id)
@@ -1029,8 +1032,9 @@ class DiscordListener:
                                     # Отмечаем все предметы как отправленные этому пользователю
                                     for item_name, qty in all_items.items():
                                         mark_item_sent_to_user(user_id, item_name, qty, update_id)
+                                    sent_count += 1
                     
-                    logger.info(f"📤 Отправлено {len(users)} пользователям")
+                    logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)}")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -1042,25 +1046,44 @@ class DiscordListener:
         while self.running:
             try:
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
+                    logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
+                    
                     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=1"
                     r = requests.get(url, headers=self.headers, timeout=5)
                     
+                    logger.info(f"📊 Статус ответа: {r.status_code}")
+                    
                     if r.status_code == 200:
                         messages = r.json()
+                        logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
+                        
                         if messages:
                             msg = messages[0]
                             msg_id = msg['id']
+                            author = msg['author']['username']
+                            logger.info(f"👤 Автор последнего: {author}")
                             
                             # Проверяем, не обрабатывали ли уже это сообщение
                             if self.last_messages.get(str(channel_id)) != msg_id:
-                                if msg['author']['username'] == 'Dawnbot':
+                                logger.info(f"🆕 Новое сообщение от {author}")
+                                
+                                if author == 'Dawnbot':
+                                    logger.info(f"📨 Это Dawnbot! Парсим...")
                                     all_items, rare_items = self.parse_message(msg, channel_name)
+                                    
+                                    logger.info(f"📦 Найдено предметов: всего {len(all_items)}, редких {len(rare_items)}")
                                     
                                     if all_items or rare_items:
                                         await self.send_to_destinations(all_items, rare_items)
                                     
                                     self.last_messages[str(channel_id)] = msg_id
                                     self.save_last()
+                                else:
+                                    logger.info(f"⏭️ Не Dawnbot, пропускаем")
+                            else:
+                                logger.info(f"⏭️ Сообщение уже обработано ранее")
+                    else:
+                        logger.error(f"❌ Ошибка Discord API: {r.status_code}")
                     
                     await asyncio.sleep(1)
                 

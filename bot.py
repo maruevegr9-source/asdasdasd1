@@ -915,49 +915,58 @@ class DiscordListener:
         
         if msg.get('content'):
             full_text += msg['content'] + "\n"
+            logger.info(f"📝 Content: {msg['content'][:200]}")
         
         if msg.get('embeds'):
-            for embed in msg['embeds']:
+            for i, embed in enumerate(msg['embeds']):
+                logger.info(f"🖼️ Embed {i+1}:")
                 if embed.get('title'):
                     full_text += embed['title'] + "\n"
+                    logger.info(f"   Title: {embed['title']}")
                 if embed.get('description'):
                     full_text += embed['description'] + "\n"
+                    logger.info(f"   Description: {embed['description'][:200]}")
                 if embed.get('fields'):
                     for field in embed['fields']:
                         full_text += f"{field.get('name', '')}: {field.get('value', '')}\n"
+                        logger.info(f"   Field: {field.get('name')} = {field.get('value')}")
         
-        logger.info(f"📄 Полный текст сообщения: {full_text[:200]}...")
+        logger.info(f"📄 Полный текст для парсинга: {full_text[:500]}")
         
-        # Паттерн 1: @Cherry (x1)
-        matches = re.findall(r'@?(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text, re.IGNORECASE)
+        # Паттерн 1: @Beetroot (x4) - основной
+        matches = re.findall(r'@?(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
         for name, qty in matches:
-            quantities[name] = int(qty)
-            logger.info(f"✅ Паттерн 1: {name} x{qty}")
+            clean_name = name.strip()
+            quantities[clean_name] = int(qty)
+            logger.info(f"✅ Найдено по паттерну 1: {clean_name} x{qty}")
         
-        # Паттерн 2: Cherry x1
-        if not quantities:
-            matches = re.findall(r'(\w+(?:\s+\w+)?)\s+x(\d+)', full_text, re.IGNORECASE)
-            for name, qty in matches:
-                if name.lower() not in ['the', 'shop', 'has', 'been', 'restocked', 'restocks', 'every', 'minutes', 'seed', 'gear']:
-                    quantities[name] = int(qty)
-                    logger.info(f"✅ Паттерн 2: {name} x{qty}")
+        # Паттерн 2: для погоды "It's now @Fog!"
+        weather_match = re.search(r'now @?(\w+)!', full_text)
+        if weather_match:
+            weather_name = weather_match.group(1).lower()
+            if weather_name in [w.lower() for w in WEATHER_LIST]:
+                # Находим оригинальное название
+                for w in WEATHER_LIST:
+                    if w.lower() == weather_name:
+                        quantities[w] = 1
+                        logger.info(f"✅ Найдена погода: {w}")
+                        break
         
-        # Паттерн 3: Ищем по спискам известных предметов
+        # Паттерн 3: просто ищем названия предметов из списков
         if not quantities:
             for item in SEEDS_LIST + GEAR_LIST + WEATHER_LIST:
-                # Ищем "Item: 5" или "Item 5"
-                patterns = [
-                    rf'{re.escape(item)}[:\s]+(\d+)',
-                    rf'{re.escape(item)}.*?(\d+)',
-                ]
-                for pattern in patterns:
+                if item.lower() in full_text.lower():
+                    # Пытаемся найти количество рядом
+                    pattern = rf'{re.escape(item)}.*?(\d+)'
                     match = re.search(pattern, full_text, re.IGNORECASE)
                     if match:
                         quantities[item] = int(match.group(1))
-                        logger.info(f"✅ Паттерн 3: {item} x{match.group(1)}")
-                        break
+                        logger.info(f"✅ Найдено по паттерну 3: {item} x{match.group(1)}")
         
         logger.info(f"📊 Итого найдено предметов: {len(quantities)}")
+        if quantities:
+            logger.info(f"📦 Список: {list(quantities.items())}")
+        
         return quantities
     
     def parse_message(self, msg, channel_name):
@@ -1004,6 +1013,16 @@ class DiscordListener:
                 message_parts.append("🔔 <b>НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n\n" + "\n".join(msg_items))
         
         return "\n\n".join(message_parts) if message_parts else None
+    
+    def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
+        translated = translate(weather_type)
+        if end_timestamp:
+            try:
+                msk_time = get_msk_time_from_timestamp(end_timestamp)
+                return f"<b>🌤️ Началась погода {translated}! Активна до {msk_time} (МСК)</b>"
+            except:
+                return f"<b>🌤️ Началась погода {translated}!</b>"
+        return f"<b>🌤️ Началась погода {translated}!</b>"
     
     async def send_to_destinations(self, all_items, rare_items, weather_info=None):
         """Отправляет данные в канал и личку (только новые)"""

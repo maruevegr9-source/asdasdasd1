@@ -112,14 +112,13 @@ TRANSLATIONS = {
     "Watering Can": "💧 Лейка", "Basic Sprinkler": "💦 Простой разбрызгиватель",
     "Harvest Bell": "🔔 Колокол сбора", "Turbo Sprinkler": "⚡ Турбо-разбрызгиватель",
     "Favorite Tool": "⭐ Любимый инструмент", "Super Sprinkler": "💎 Супер-разбрызгиватель",
-    "Trowel": "🪓 Лопатка",
     "fog": "🌫️ Туман", "rain": "🌧️ Дождь", "snow": "❄️ Снег",
     "storm": "⛈️ Шторм", "sandstorm": "🏜️ Песчаная буря", "starfall": "⭐ Звездопад"
 }
 
 ALLOWED_CHANNEL_ITEMS = ["Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
 SEEDS_LIST = ["Carrot", "Corn", "Onion", "Strawberry", "Mushroom", "Beetroot", "Tomato", "Apple", "Rose", "Wheat", "Banana", "Plum", "Potato", "Cabbage", "Cherry", "Mango", "Bamboo"]
-GEAR_LIST = ["Watering Can", "Basic Sprinkler", "Harvest Bell", "Turbo Sprinkler", "Favorite Tool", "Super Sprinkler", "Trowel"]
+GEAR_LIST = ["Watering Can", "Basic Sprinkler", "Harvest Bell", "Turbo Sprinkler", "Favorite Tool", "Super Sprinkler"]
 WEATHER_LIST = ["fog", "rain", "snow", "storm", "sandstorm", "starfall"]
 RARE_ITEMS = ["Super Sprinkler", "Favorite Tool", "starfall", "Mango", "Bamboo"]
 
@@ -869,23 +868,18 @@ class DiscordListener:
         self.running = True
         self.main_channel_id = int(MAIN_CHANNEL_ID) if MAIN_CHANNEL_ID else None
         
-        # Загружаем сохранённые ID сообщений
         try:
-            if os.path.exists('last_discord.json'):
-                with open('last_discord.json', 'r') as f:
-                    self.last_messages = json.load(f)
-                logger.info(f"📂 Загружено {len(self.last_messages)} записей из last_discord.json")
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки last_discord.json: {e}")
-            self.last_messages = {}
+            with open('last_discord.json', 'r') as f:
+                self.last_messages = json.load(f)
+        except:
+            pass
     
     def save_last(self):
         try:
             with open('last_discord.json', 'w') as f:
-                json.dump(self.last_messages, f, indent=2)
-            logger.info(f"💾 Сохранено {len(self.last_messages)} записей в last_discord.json")
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения last_discord.json: {e}")
+                json.dump(self.last_messages, f)
+        except:
+            pass
     
     def get_role_name(self, role_id):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -906,88 +900,19 @@ class DiscordListener:
             pass
         return None
     
-    def extract_quantities(self, msg):
-        """Извлекает количества предметов из сообщения"""
-        quantities = {}
-        
-        # Собираем весь текст из сообщения
-        full_text = ""
-        
-        if msg.get('content'):
-            full_text += msg['content'] + "\n"
-            logger.info(f"📝 Content: {msg['content'][:500]}")
-        
-        if msg.get('embeds'):
-            for i, embed in enumerate(msg['embeds']):
-                if embed.get('description'):
-                    full_text += embed['description'] + "\n"
-                    logger.info(f"🖼️ Embed {i+1} description: {embed['description'][:500]}")
-        
-        logger.info(f"📄 Полный текст для парсинга: {full_text[:500]}")
-        
-        # Паттерн 1: @Rose (x1) - основной формат из скрина
-        matches = re.findall(r'@(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
-        for name, qty in matches:
-            clean_name = name.strip()
-            quantities[clean_name] = int(qty)
-            logger.info(f"✅ Найдено @-паттерн: {clean_name} x{qty}")
-        
-        # Паттерн 2: если вдруг без @
-        if not quantities:
-            matches = re.findall(r'(\w+(?:\s+\w+)?)\s*\(x(\d+)\)', full_text)
-            for name, qty in matches:
-                # Исключаем общие слова
-                if name not in ['The', 'Seed', 'Shop', 'has', 'been', 'restocked', 'Weather', 'Update', 'Start', 'End']:
-                    clean_name = name.strip()
-                    quantities[clean_name] = int(qty)
-                    logger.info(f"✅ Найдено без @: {clean_name} x{qty}")
-        
-        # Паттерн 3: для погоды "It's now @Fog!"
-        weather_match = re.search(r'now @?(\w+)!', full_text)
-        if weather_match:
-            weather_name = weather_match.group(1).lower()
-            # Приводим к правильному регистру
-            for w in WEATHER_LIST:
-                if w.lower() == weather_name:
-                    quantities[w] = 1
-                    logger.info(f"✅ Найдена погода: {w}")
-                    break
-        
-        logger.info(f"📊 Итого найдено предметов: {len(quantities)}")
-        if quantities:
-            logger.info(f"📦 Список: {list(quantities.items())}")
-        
-        return quantities
-    
-    def parse_message(self, msg, channel_name):
-        """Парсит сообщение и возвращает словарь предметов с количествами"""
-        quantities = self.extract_quantities(msg)
-        
-        all_items = {}  # {item_name: quantity}
-        rare_items = {}  # {item_name: quantity}
-        
-        for item_name, qty in quantities.items():
-            all_items[item_name] = qty
-            if is_allowed_for_main_channel(item_name):
-                rare_items[item_name] = qty
-        
-        logger.info(f"📦 После фильтрации: всего {len(all_items)}, редких {len(rare_items)}")
-        return all_items, rare_items
-    
-    def format_channel_message(self, item_name: str, quantity: int) -> str:
-        """Формат для канала (только редкие)"""
+    def format_channel_message(self, item_name: str, quantity: int = None) -> str:
         translated = translate(item_name)
+        quantity_text = f"📦 Количество: {quantity} шт.\n" if quantity else ""
         return (
-            f"✨ <b>{translated}</b>\n"
-            f"📦 <b>Количество:</b> {quantity} шт.\n"
+            f"✨ {translated}\n"
+            f"{quantity_text}"
             f"━━━━━━━━━━━━━━\n"
             f"<a href='{DEFAULT_REQUIRED_CHANNEL_LINK}'>📢 Наш канал</a> | <a href='{BOT_LINK}'>🤖 Авто-сток</a> | <a href='{CHAT_LINK}'>💬 Наш чат</a>\n"
             f"━━━━━━━━━━━━━━\n"
             f"👀 Включи уведомления в канале!"
         )
     
-    def format_pm_message(self, items: Dict[str, int], weather_info: str = None) -> str:
-        """Формат для лички (все предметы с переводом, одним сообщением)"""
+    def format_pm_message(self, items: List[tuple], weather_info: str = None) -> str:
         message_parts = []
         
         if weather_info:
@@ -995,81 +920,55 @@ class DiscordListener:
         
         if items:
             msg_items = []
-            for name, qty in items.items():
+            for name, qty in items:
                 translated = translate(name)
-                msg_items.append(f"<b>{translated}:</b> {qty} шт.")
+                msg_items.append(f"{translated}: {qty} шт.")
             
             if msg_items:
-                message_parts.append("🔔 <b>НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n\n" + "\n".join(msg_items))
+                message_parts.append("🔔 НОВЫЕ ПРЕДМЕТЫ В СТОКЕ\n\n" + "\n".join(msg_items))
         
         return "\n\n".join(message_parts) if message_parts else None
     
-    def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
-        translated = translate(weather_type)
-        if end_timestamp:
-            try:
-                msk_time = get_msk_time_from_timestamp(end_timestamp)
-                return f"<b>🌤️ Началась погода {translated}! Активна до {msk_time} (МСК)</b>"
-            except:
-                return f"<b>🌤️ Началась погода {translated}!</b>"
-        return f"<b>🌤️ Началась погода {translated}!</b>"
+    def parse_message(self, msg, channel_name):
+        all_items = []
+        rare_items = []
+        
+        if msg.get('mention_roles'):
+            for role_id in msg['mention_roles']:
+                role_name = self.get_role_name(role_id)
+                if role_name:
+                    all_items.append((role_name, 1))
+                    if is_allowed_for_main_channel(role_name):
+                        rare_items.append((role_name, 1))
+        
+        return all_items, rare_items
     
     async def send_to_destinations(self, all_items, rare_items, weather_info=None):
-        """Отправляет данные в канал и личку (только новые)"""
-        
-        # Генерируем update_id на основе времени сообщения
-        update_id = str(int(time.time()))
-        
-        # 1. Отправка в основной канал (только редкие)
         if rare_items and self.main_channel_id:
-            for item_name, qty in rare_items.items():
-                # Проверяем, не отправляли ли уже
-                if not was_item_sent_in_this_update(item_name, qty, update_id):
-                    msg = self.format_channel_message(item_name, qty)
-                    await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
-                    mark_item_sent_for_update(item_name, qty, update_id)
-                    logger.info(f"📤 Редкий предмет в основной канал: {item_name} x{qty}")
+            for item_name, qty in rare_items:
+                msg = self.format_channel_message(item_name, qty)
+                await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
+                logger.info(f"📤 Редкий предмет в канал: {item_name}")
         
-        # 2. Отправка в каналы автопостинга (только редкие)
+        if all_items:
+            pm_message = self.format_pm_message(all_items, weather_info)
+            if pm_message:
+                users = get_all_users()
+                for user_id in users:
+                    if user_id != ADMIN_ID:
+                        settings = self.bot.user_manager.get_user(user_id)
+                        if settings.notifications_enabled:
+                            await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
+                logger.info(f"📤 Отправлено {len(users)} пользователям")
+        
         if rare_items:
             for channel in self.bot.posting_channels:
                 try:
-                    for item_name, qty in rare_items.items():
-                        if not was_item_sent_in_this_update(item_name, qty, update_id):
-                            msg = self.format_channel_message(item_name, qty)
-                            await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
-                            logger.info(f"📤 Редкий предмет в канал автопостинга {channel['name']}: {item_name} x{qty}")
+                    for item_name, qty in rare_items:
+                        msg = self.format_channel_message(item_name, qty)
+                        await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
-        
-        # 3. Отправка в личку (все предметы одним сообщением)
-        if all_items:
-            # Получаем всех пользователей
-            users = get_all_users()
-            if users:
-                # Формируем сообщение для лички
-                pm_message = self.format_pm_message(all_items, weather_info)
-                if pm_message:
-                    sent_count = 0
-                    for user_id in users:
-                        if user_id != ADMIN_ID:
-                            settings = self.bot.user_manager.get_user(user_id)
-                            if settings.notifications_enabled:
-                                # Проверяем, есть ли новые предметы для этого пользователя
-                                has_new = False
-                                for item_name, qty in all_items.items():
-                                    if not was_item_sent_to_user(user_id, item_name, qty, update_id):
-                                        has_new = True
-                                        break
-                                
-                                if has_new:
-                                    await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
-                                    # Отмечаем все предметы как отправленные этому пользователю
-                                    for item_name, qty in all_items.items():
-                                        mark_item_sent_to_user(user_id, item_name, qty, update_id)
-                                    sent_count += 1
-                    
-                    logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)}")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -1081,47 +980,24 @@ class DiscordListener:
         while self.running:
             try:
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
-                    logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
-                    
-                    # Берем 5 последних сообщений
-                    url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
+                    url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=1"
                     r = requests.get(url, headers=self.headers, timeout=5)
-                    
-                    logger.info(f"📊 Статус ответа: {r.status_code}")
                     
                     if r.status_code == 200:
                         messages = r.json()
-                        logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
-                        
-                        # Перебираем все полученные сообщения (от новых к старым)
-                        for msg in messages:
+                        if messages:
+                            msg = messages[0]
                             msg_id = msg['id']
-                            author = msg['author']['username']
                             
-                            # Уникальный ключ для каждого сообщения в каждом канале
-                            msg_key = f"{channel_id}_{msg_id}"
-                            
-                            # Проверяем, не обрабатывали ли уже это сообщение
-                            if msg_key in self.last_messages:
-                                logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
-                                continue
-                            
-                            logger.info(f"🆕 НОВОЕ сообщение от {author}, ID: {msg_id}")
-                            
-                            if author == 'Dawnbot':
-                                logger.info(f"📨 Это Dawnbot! Парсим...")
-                                all_items, rare_items = self.parse_message(msg, channel_name)
-                                
-                                if all_items or rare_items:
-                                    await self.send_to_destinations(all_items, rare_items)
-                                
-                                # Сохраняем ID обработанного сообщения
-                                self.last_messages[msg_key] = True
-                                self.save_last()
-                            else:
-                                logger.info(f"⏭️ Не Dawnbot, пропускаем")
-                    else:
-                        logger.error(f"❌ Ошибка Discord API: {r.status_code}")
+                            if self.last_messages.get(str(channel_id)) != msg_id:
+                                if msg['author']['username'] == 'Dawnbot':
+                                    all_items, rare_items = self.parse_message(msg, channel_name)
+                                    
+                                    if all_items or rare_items:
+                                        await self.send_to_destinations(all_items, rare_items)
+                                    
+                                    self.last_messages[str(channel_id)] = msg_id
+                                    self.save_last()
                     
                     await asyncio.sleep(1)
                 
@@ -2298,6 +2174,41 @@ class GardenHorizonsBot:
                     parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
         
         return "\n\n".join(parts) if parts else None
+    
+    def format_channel_message(self, item_name: str, quantity: int) -> str:
+        translated = translate(item_name)
+        return (
+            f"✨ <b>{translated}</b>\n"
+            f"📦 <b>Количество:</b> {quantity} шт.\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"<a href='{DEFAULT_REQUIRED_CHANNEL_LINK}'>📢 Наш канал</a> | <a href='{BOT_LINK}'>🤖 Авто-сток</a> | <a href='{CHAT_LINK}'>💬 Наш чат</a>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"👀 Включи уведомления в канале!"
+        )
+    
+    def format_pm_message(self, items: List[tuple]) -> str:
+        if not items:
+            return None
+        
+        message = "<b>🔔 НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n\n"
+        
+        weather_items = [i for i in items if i[0] in WEATHER_LIST]
+        seed_items = [i for i in items if i[0] in SEEDS_LIST]
+        gear_items = [i for i in items if i[0] in GEAR_LIST]
+        
+        for item_name, quantity in weather_items:
+            translated = translate(item_name)
+            message += f"<b>🌤️ Активна погода!</b> {translated}\n"
+        
+        for item_name, quantity in seed_items:
+            translated = translate(item_name)
+            message += f"<b>{translated}:</b> {quantity} шт.\n"
+        
+        for item_name, quantity in gear_items:
+            translated = translate(item_name)
+            message += f"<b>{translated}:</b> {quantity} шт.\n"
+        
+        return message
     
     def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
         translated = translate(weather_type)

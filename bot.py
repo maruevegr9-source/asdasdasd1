@@ -994,20 +994,30 @@ class DiscordListener:
                     mark_item_sent_for_update(item_name, qty, update_id)
                     logger.info(f"📤 Редкий предмет в канал: {item_name} x{qty}")
         
-        # 2. Отправка в личку (все предметы одним сообщением)
+        # 2. Отправка в каналы автопостинга (только редкие)
+        if rare_items:
+            for channel in self.bot.posting_channels:
+                try:
+                    for item_name, qty in rare_items.items():
+                        if not was_item_sent_in_this_update(item_name, qty, update_id):
+                            msg = self.format_channel_message(item_name, qty)
+                            await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
+                except Exception as e:
+                    logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
+        
+        # 3. Отправка в личку (все предметы одним сообщением)
         if all_items:
-            # Проверяем, есть ли вообще что-то новое для пользователей
+            # Получаем всех пользователей
             users = get_all_users()
             if users:
+                # Формируем сообщение для лички
                 pm_message = self.format_pm_message(all_items, weather_info)
                 if pm_message:
                     for user_id in users:
                         if user_id != ADMIN_ID:
                             settings = self.bot.user_manager.get_user(user_id)
                             if settings.notifications_enabled:
-                                # Проверяем, не отправляли ли уже этот апдейт пользователю
-                                # В идеале нужно проверять по каждому предмету, но для простоты будем считать,
-                                # что если есть новые предметы, отправляем всё одним сообщением
+                                # Проверяем, есть ли новые предметы для этого пользователя
                                 has_new = False
                                 for item_name, qty in all_items.items():
                                     if not was_item_sent_to_user(user_id, item_name, qty, update_id):
@@ -1021,17 +1031,6 @@ class DiscordListener:
                                         mark_item_sent_to_user(user_id, item_name, qty, update_id)
                     
                     logger.info(f"📤 Отправлено {len(users)} пользователям")
-        
-        # 3. Отправка в каналы автопостинга (только редкие)
-        if rare_items:
-            for channel in self.bot.posting_channels:
-                try:
-                    for item_name, qty in rare_items.items():
-                        if not was_item_sent_in_this_update(item_name, qty, update_id):
-                            msg = self.format_channel_message(item_name, qty)
-                            await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
-                except Exception as e:
-                    logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -2249,30 +2248,6 @@ class GardenHorizonsBot:
             f"━━━━━━━━━━━━━━\n"
             f"👀 Включи уведомления в канале!"
         )
-    
-    def format_pm_message(self, items: List[tuple]) -> str:
-        if not items:
-            return None
-        
-        message = "<b>🔔 НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n\n"
-        
-        weather_items = [i for i in items if i[0] in WEATHER_LIST]
-        seed_items = [i for i in items if i[0] in SEEDS_LIST]
-        gear_items = [i for i in items if i[0] in GEAR_LIST]
-        
-        for item_name, quantity in weather_items:
-            translated = translate(item_name)
-            message += f"<b>🌤️ Активна погода!</b> {translated}\n"
-        
-        for item_name, quantity in seed_items:
-            translated = translate(item_name)
-            message += f"<b>{translated}:</b> {quantity} шт.\n"
-        
-        for item_name, quantity in gear_items:
-            translated = translate(item_name)
-            message += f"<b>{translated}:</b> {quantity} шт.\n"
-        
-        return message
     
     def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
         translated = translate(weather_type)

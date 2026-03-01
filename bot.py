@@ -820,7 +820,8 @@ class MessageQueue:
                             await asyncio.sleep(0.05)
                             
                         except Exception as e:
-                            logger.error(f"Ошибка отправки: {e}")
+                            # Игнорируем ошибки отправки (заблокировавшие бота и т.д.)
+                            pass
                     
                     self.sent_count += len(batch)
                     if self.sent_count % 100 == 0:
@@ -865,13 +866,13 @@ class DiscordListener:
     def __init__(self, telegram_bot_instance):
         self.bot = telegram_bot_instance
         self.headers = {'authorization': DISCORD_TOKEN} if DISCORD_TOKEN else None
-        self.last_messages = {}
+        self.last_messages = set()  # Множество для быстрой проверки
         self.role_cache = {}
         self.running = True
         self.main_channel_id = int(MAIN_CHANNEL_ID) if MAIN_CHANNEL_ID else None
-        self.first_run = True  # Флаг первого запуска
+        self.first_run = True
+        self.processed_count = 0
         
-        # Загружаем сохранённые ID сообщений
         self.load_last_messages()
     
     def load_last_messages(self):
@@ -879,19 +880,24 @@ class DiscordListener:
         try:
             if os.path.exists('last_discord.json'):
                 with open('last_discord.json', 'r') as f:
-                    self.last_messages = json.load(f)
+                    data = json.load(f)
+                    # Преобразуем список в множество для быстрой проверки
+                    self.last_messages = set(data.get('processed', []))
                 logger.info(f"📂 Загружено {len(self.last_messages)} записей из last_discord.json")
             else:
                 logger.info("📂 Файл last_discord.json не найден, начинаем с чистого листа")
-                self.last_messages = {}
+                self.last_messages = set()
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки last_discord.json: {e}")
-            self.last_messages = {}
+            self.last_messages = set()
     
     def save_last(self):
+        """Сохраняет ID обработанных сообщений"""
         try:
+            # Сохраняем только последние 1000 ID (чтобы файл не раздувался)
+            to_save = list(self.last_messages)[-1000:] if len(self.last_messages) > 1000 else list(self.last_messages)
             with open('last_discord.json', 'w') as f:
-                json.dump(self.last_messages, f, indent=2)
+                json.dump({'processed': to_save}, f, indent=2)
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения last_discord.json: {e}")
     
@@ -965,21 +971,28 @@ class DiscordListener:
             f"👀 Включи уведомления в канале!"
         )
     
-    def format_pm_message(self, items: List[tuple], weather_info: str = None) -> str:
-        """Формат для лички (все предметы с переводом, одним сообщением)"""
+    def format_pm_message(self, items: List[tuple], weather_info: str = None, channel_name: str = None) -> str:
+        """Формат для лички (все предметы с переводом, с указанием категории)"""
         message_parts = []
         
         if weather_info:
             message_parts.append(weather_info)
         
         if items:
+            # Определяем категорию
+            category_name = {
+                'seeds': '🌱 Семена',
+                'gear': '⚙️ Снаряжение',
+                'weather': '🌤️ Погода'
+            }.get(channel_name, channel_name.upper() if channel_name else 'Предметы')
+            
             msg_items = []
             for name, qty in items:
                 translated = translate(name)
-                msg_items.append(f"<b>{translated}:</b> {qty} шт.")
+                msg_items.append(f"{translated}: {qty} шт.")
             
             if msg_items:
-                message_parts.append("🔔 <b>НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n\n" + "\n".join(msg_items))
+                message_parts.append(f"🔔 <b>НОВЫЕ ПРЕДМЕТЫ В СТОКЕ</b>\n<b>{category_name}:</b>\n" + "\n".join(msg_items))
         
         return "\n\n".join(message_parts) if message_parts else None
     
@@ -993,9 +1006,13 @@ class DiscordListener:
                 return f"<b>🌤️ Началась погода {translated}!</b>"
         return f"<b>🌤️ Началась погода {translated}!</b>"
     
-    async def send_to_destinations(self, all_items, rare_items, weather_info=None):
+    async def send_to_destinations(self, all_items, rare_items, weather_info=None, channel_name=None):
         """Отправляет данные в канал и личку (только новые)"""
         
+        if not all_items and not rare_items:
+            return
+            
+        # Единый update_id для всего сообщения
         update_id = str(int(time.time()))
         
         # 1. Отправка в основной канал (только редкие)
@@ -1023,7 +1040,7 @@ class DiscordListener:
         if all_items:
             users = get_all_users()
             if users:
-                pm_message = self.format_pm_message(all_items, weather_info)
+                pm_message = self.format_pm_message(all_items, weather_info, channel_name)
                 if pm_message:
                     sent_count = 0
                     for user_id in users:
@@ -1073,14 +1090,16 @@ class DiscordListener:
                             msg_id = msg['id']
                             author = msg['author']['username']
                             
+                            # Уникальный ключ для каждого сообщения
                             msg_key = f"{channel_id}_{msg_id}"
                             
                             # Пропускаем старые сообщения при первом запуске
                             if self.first_run:
-                                self.last_messages[msg_key] = True
+                                self.last_messages.add(msg_key)
                                 logger.info(f"🚀 Первый запуск, сохраняем ID {msg_id} без обработки")
                                 continue
                             
+                            # Проверяем, не обрабатывали ли уже
                             if msg_key in self.last_messages:
                                 logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
                                 continue
@@ -1092,20 +1111,25 @@ class DiscordListener:
                                 all_items, rare_items = self.parse_message(msg, channel_name)
                                 
                                 if all_items or rare_items:
-                                    await self.send_to_destinations(all_items, rare_items)
+                                    await self.send_to_destinations(all_items, rare_items, channel_name=channel_name)
                                 else:
                                     logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
                                 
-                                self.last_messages[msg_key] = True
-                                self.save_last()
+                                # Сохраняем ID обработанного сообщения
+                                self.last_messages.add(msg_key)
+                                self.processed_count += 1
+                                
+                                # Сохраняем в файл каждые 10 сообщений
+                                if self.processed_count % 10 == 0:
+                                    self.save_last()
                             else:
                                 logger.info(f"⏭️ Не Dawnbot, пропускаем")
                         
-                        # После первого цикла отключаем флаг
+                        # После первого цикла отключаем флаг и сохраняем
                         if self.first_run:
                             self.first_run = False
                             self.save_last()
-                            logger.info("🚀 Первый запуск завершён, дальше только новые сообщения")
+                            logger.info(f"🚀 Первый запуск завершён, сохранено {len(self.last_messages)} ID")
                     
                     await asyncio.sleep(1)
                 

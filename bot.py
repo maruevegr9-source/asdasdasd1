@@ -4,7 +4,6 @@ import asyncio
 import random
 import sqlite3
 import time
-import threading
 import json
 import re
 import html
@@ -42,20 +41,21 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002808898833")
 DEFAULT_REQUIRED_CHANNEL_LINK = "https://t.me/GardenHorizonsStocks"
 
-# Данные для Discord
+# Данные для Discord - БЕРЁМ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 DISCORD_CHANNELS = {
-    'seeds': 1474799488689377463,
-    'gear': 1474799504401236090,
-    'weather': 1474799519706255510
+    'seeds': int(os.getenv("DISCORD_SEEDS_CHANNEL", "1474799488689377463")),
+    'gear': int(os.getenv("DISCORD_GEAR_CHANNEL", "1474799504401236090")),
+    'weather': int(os.getenv("DISCORD_WEATHER_CHANNEL", "1474799519706255510"))
 }
 
+# Старое API
 API_URL = os.getenv("API_URL", "https://stock.gardenhorizonswiki.com/stock.json")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "10"))
 ADMIN_ID = 8025951500
 
-# НОВЫЕ НАСТРОЙКИ ДЛЯ ОПТИМИЗАЦИИ
+# Оптимизации
 MAX_CONCURRENT_REQUESTS = 5
 SUBSCRIPTION_CACHE_TTL = 300
 BLACKLIST_CLEANUP_INTERVAL = 3600
@@ -154,7 +154,7 @@ def get_msk_time_from_timestamp(timestamp: int) -> str:
         logger.error(f"❌ Ошибка конвертации времени: {e}")
         return "??:??:??"
 
-# ========== РАБОТА С БД ==========
+# ========== БАЗА ДАННЫХ ==========
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -263,7 +263,58 @@ def init_database():
         logger.error(f"❌ Ошибка инициализации БД: {e}")
         return False
 
-db_initialized = init_database()
+init_database()
+
+# ========== МИГРАЦИЯ БАЗЫ ДАННЫХ ==========
+try:
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("PRAGMA table_info(sent_items)")
+    columns = [column[1] for column in cur.fetchall()]
+    
+    if 'update_id' not in columns:
+        logger.warning("⚠️ Таблица sent_items не содержит колонку update_id. Запускаю миграцию...")
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sent_items_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                item_name TEXT,
+                quantity INTEGER,
+                update_id TEXT,
+                sent_at TEXT,
+                UNIQUE(chat_id, item_name, quantity, update_id)
+            )
+        """)
+        
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sent_items'")
+        if cur.fetchone():
+            try:
+                cur.execute("PRAGMA table_info(sent_items)")
+                old_columns = [col[1] for col in cur.fetchall()]
+                
+                if 'update_id' in old_columns:
+                    logger.info("✅ Колонка update_id уже существует в sent_items")
+                else:
+                    cur.execute("""
+                        INSERT INTO sent_items_new (id, chat_id, item_name, quantity, sent_at)
+                        SELECT id, chat_id, item_name, quantity, sent_at FROM sent_items
+                    """)
+                    
+                    cur.execute("DROP TABLE sent_items")
+                    cur.execute("ALTER TABLE sent_items_new RENAME TO sent_items")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при копировании данных: {e}")
+        else:
+            cur.execute("ALTER TABLE sent_items_new RENAME TO sent_items")
+        
+        conn.commit()
+        logger.info("✅ Миграция таблицы sent_items завершена")
+    
+    conn.close()
+except Exception as e:
+    logger.error(f"❌ Критическая ошибка при миграции БД: {e}", exc_info=True)
 
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БД ==========
 
@@ -811,7 +862,7 @@ class MessageQueue:
 class DiscordListener:
     def __init__(self, telegram_bot_instance):
         self.bot = telegram_bot_instance
-        self.headers = {'authorization': DISCORD_TOKEN}
+        self.headers = {'authorization': DISCORD_TOKEN} if DISCORD_TOKEN else None
         self.last_messages = {}
         self.role_cache = {}
         self.running = True
@@ -831,6 +882,9 @@ class DiscordListener:
             pass
     
     def get_role_name(self, role_id):
+        if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
+            return f"роль {role_id}"
+            
         if role_id in self.role_cache:
             return self.role_cache[role_id]
         try:
@@ -863,6 +917,10 @@ class DiscordListener:
             logger.info(f"📤 Отправлено из Discord в Telegram канал")
     
     async def run(self):
+        if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
+            logger.warning("⚠️ DISCORD_TOKEN или DISCORD_GUILD_ID не заданы, Discord слушатель отключён")
+            return
+        
         logger.info("🔌 Discord слушатель запущен")
         
         while self.running:
@@ -1016,7 +1074,7 @@ class GardenHorizonsBot:
         asyncio.create_task(self._cleanup_cache_loop())
         
         logger.info(f"🤖 Бот инициализирован. Админ ID: {ADMIN_ID}")
-        logger.info(f"⚙️ Оптимизации: воркеров=5, кэш={SUBSCRIPTION_CACHE_TTL}с")
+        logger.info(f"⚙️ Оптимизации: воркеров=5, кэш={SUBSCRIPTION_CACHE_TTL}с, макс_запросов={MAX_CONCURRENT_REQUESTS}")
     
     async def process_update_with_middleware(self, update: Update):
         try:
@@ -1983,11 +2041,7 @@ class GardenHorizonsBot:
             return
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.message:
-            return
         user = update.effective_user
-        if not user:
-            return
         text = update.message.text
         
         if any(key in context.user_data for key in ['op_channel_id', 'post_channel_id', 'mailing_text']):
@@ -2359,11 +2413,7 @@ class GardenHorizonsBot:
             logger.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ API!")
         
         await self.message_queue.start()
-        
-        # Запускаем мониторинг API
         asyncio.create_task(self.monitor_loop())
-        
-        # Запускаем Discord слушатель
         asyncio.create_task(self.discord_listener.run())
         
         await self.application.initialize()
@@ -2373,7 +2423,7 @@ class GardenHorizonsBot:
         logger.info(f"📡 API: {API_URL}")
         logger.info(f"📱 Основной канал: {MAIN_CHANNEL_ID}")
         logger.info(f"👑 Админ: {ADMIN_ID}")
-        logger.info(f"🔌 Discord слушатель: активен")
+        logger.info(f"🔌 Discord слушатель: {'активен' if DISCORD_TOKEN else 'отключён'}")
         
         await self.application.updater.start_polling()
         

@@ -1131,106 +1131,137 @@ class DiscordListener:
         
         logger.info("🔌 Discord слушатель запущен")
         
+        # Разные User-Agent для каждого запроса
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
+            'Mozilla/5.0 (iPad; CPU OS 14_0 like Mac OS X) AppleWebKit/605.1.15'
+        ]
+        
         while self.running:
             try:
                 # Проверяем ночной режим
                 if is_night_time_msk():
-                    # Ночной режим: спим 10-15 минут
-                    night_sleep = random.randint(600, 900)  # 10-15 минут
+                    night_sleep = random.randint(900, 1200)  # 15-20 минут
                     logger.info(f"🌙 Ночной режим (1:00-8:00 МСК). Спим {night_sleep/60:.1f} минут...")
                     await asyncio.sleep(night_sleep)
-                    self.error_count = 0  # Сброс счетчика ошибок
+                    self.error_count = 0
                     continue
                 
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
-                    # Пропускаем каналы для естественности (кроме seeds!)
-                    if channel_name != 'seeds' and random.random() < 0.1:
-                        logger.info(f"⏭️ Пропускаем {channel_name} (естественность)")
-                        await asyncio.sleep(random.uniform(30, 50))
-                        continue
+                    # Рандомная пауза перед каждым каналом
+                    await asyncio.sleep(random.uniform(2, 5))
                     
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
                     
-                    url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
-                    r = requests.get(url, headers=self.headers, timeout=5)
+                    # Меняем User-Agent каждый раз
+                    headers = {
+                        'authorization': DISCORD_TOKEN,
+                        'User-Agent': random.choice(user_agents),
+                        'Accept': 'application/json'
+                    }
                     
-                    if r.status_code == 200:
-                        self.error_count = 0  # Сброс счетчика при успехе
-                        messages = r.json()
-                        logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
+                    try:
+                        url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
+                        r = requests.get(url, headers=headers, timeout=10)
                         
-                        for msg in messages:
-                            msg_id = msg['id']
-                            author = msg['author']['username']
+                        if r.status_code == 200:
+                            self.error_count = 0
+                            messages = r.json()
+                            logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
                             
-                            msg_key = f"{channel_id}_{msg_id}"
-                            
-                            if msg_key in self.last_messages:
-                                logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
-                                continue
-                            
-                            logger.info(f"🆕 НОВОЕ сообщение от {author}, ID: {msg_id}")
-                            
-                            if author == 'Dawnbot':
-                                logger.info(f"📨 Это Dawnbot! Парсим...")
-                                all_items, rare_items = self.parse_message(msg, channel_name)
+                            for msg in messages:
+                                msg_id = msg['id']
+                                author = msg['author']['username']
                                 
-                                # Проверяем погоду отдельно
-                                weather_info = None
-                                if channel_name == 'weather' and all_items:
-                                    # Для погоды формируем специальное сообщение
-                                    for name, qty in all_items:
-                                        if name in WEATHER_LIST:
-                                            # Пытаемся найти время окончания в сообщении
-                                            end_timestamp = None
-                                            if msg.get('content'):
-                                                # Ищем время в формате HH:MM
-                                                time_match = re.search(r'(\d{1,2}):(\d{2})', msg['content'])
-                                                if time_match:
-                                                    # Конвертируем в timestamp (приблизительно)
-                                                    current_time = int(time.time())
-                                                    hours, minutes = map(int, time_match.groups())
-                                                    # Предполагаем, что время сегодня/завтра
-                                                    end_timestamp = current_time + (hours * 3600 + minutes * 60)
-                                            
-                                            weather_info = self.format_weather_started_message(name, end_timestamp)
-                                            # Отправляем уведомление о погоде отдельно
-                                            if not was_weather_notification_sent(name, 'started', str(msg_id)):
-                                                # Отправляем в каналы автопостинга
-                                                for channel in self.bot.posting_channels:
-                                                    await self.bot.message_queue.queue.put(
-                                                        (int(channel['id']), weather_info, 'HTML', None)
-                                                    )
-                                                # И в личку
-                                                await self.send_weather_to_users(name, end_timestamp, str(msg_id))
-                                                mark_weather_notification_sent(name, 'started', str(msg_id))
+                                msg_key = f"{channel_id}_{msg_id}"
                                 
-                                if all_items or rare_items:
-                                    await self.send_to_destinations(all_items, rare_items, weather_info)
+                                if msg_key in self.last_messages:
+                                    logger.info(f"⏭️ Сообщение {msg_id} уже обработано ранее")
+                                    continue
+                                
+                                logger.info(f"🆕 НОВОЕ сообщение от {author}, ID: {msg_id}")
+                                
+                                if author == 'Dawnbot':
+                                    logger.info(f"📨 Это Dawnbot! Парсим...")
+                                    all_items, rare_items = self.parse_message(msg, channel_name)
+                                    
+                                    # Проверяем погоду отдельно
+                                    weather_info = None
+                                    if channel_name == 'weather' and all_items:
+                                        # Для погоды формируем специальное сообщение
+                                        for name, qty in all_items:
+                                            if name in WEATHER_LIST:
+                                                # Пытаемся найти время окончания в сообщении
+                                                end_timestamp = None
+                                                if msg.get('content'):
+                                                    # Ищем время в формате HH:MM
+                                                    time_match = re.search(r'(\d{1,2}):(\d{2})', msg['content'])
+                                                    if time_match:
+                                                        # Конвертируем в timestamp (приблизительно)
+                                                        current_time = int(time.time())
+                                                        hours, minutes = map(int, time_match.groups())
+                                                        # Предполагаем, что время сегодня/завтра
+                                                        end_timestamp = current_time + (hours * 3600 + minutes * 60)
+                                                
+                                                weather_info = self.format_weather_started_message(name, end_timestamp)
+                                                # Отправляем уведомление о погоде отдельно
+                                                if not was_weather_notification_sent(name, 'started', str(msg_id)):
+                                                    # Отправляем в каналы автопостинга
+                                                    for channel in self.bot.posting_channels:
+                                                        await self.bot.message_queue.queue.put(
+                                                            (int(channel['id']), weather_info, 'HTML', None)
+                                                        )
+                                                    # И в личку
+                                                    await self.send_weather_to_users(name, end_timestamp, str(msg_id))
+                                                    mark_weather_notification_sent(name, 'started', str(msg_id))
+                                    
+                                    if all_items or rare_items:
+                                        await self.send_to_destinations(all_items, rare_items, weather_info)
+                                    else:
+                                        logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
+                                    
+                                    self.last_messages[msg_key] = True
+                                    self.save_last()
                                 else:
-                                    logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
+                                    logger.info(f"⏭️ Не Dawnbot, пропускаем")
                                 
-                                self.last_messages[msg_key] = True
-                                self.save_last()
-                            else:
-                                logger.info(f"⏭️ Не Dawnbot, пропускаем")
-                    else:
-                        logger.error(f"❌ Ошибка Discord API: {r.status_code}")
+                                # Рандомная пауза после обработки сообщения
+                                await asyncio.sleep(random.uniform(1, 3))
+                            
+                        elif r.status_code == 429:  # Rate limit!
+                            retry_after = r.json().get('retry_after', 60)
+                            logger.warning(f"⚠️ Rate limit от Discord! Ждём {retry_after} сек")
+                            await asyncio.sleep(retry_after + random.uniform(5, 15))
+                            
+                        else:
+                            logger.error(f"❌ Ошибка Discord API: {r.status_code}")
+                            self.error_count += 1
+                            # Экспоненциальная задержка при ошибках
+                            error_sleep = min(30 * (2 ** self.error_count), 300)  # 30, 60, 120, 240, макс 300
+                            logger.info(f"⏱️ Пауза после ошибки: {error_sleep} сек (попытка {self.error_count})")
+                            await asyncio.sleep(error_sleep)
+                            continue
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка при запросе к Discord: {e}")
                         self.error_count += 1
-                        # Экспоненциальная задержка при ошибках
-                        error_sleep = min(30 * (2 ** self.error_count), 300)  # 30, 60, 120, 240, макс 300
-                        logger.info(f"⏱️ Пауза после ошибки: {error_sleep} сек (попытка {self.error_count})")
+                        error_sleep = min(30 * (2 ** self.error_count), 300)
                         await asyncio.sleep(error_sleep)
                         continue
                     
-                    # Пауза между каналами: 20-40 секунд
-                    await asyncio.sleep(random.uniform(20, 40))
+                    # Пауза между каналами: 15-25 секунд
+                    await asyncio.sleep(random.uniform(15, 25))
                 
-                # Пауза после полного цикла: 60-120 секунд
-                await asyncio.sleep(random.uniform(60, 120))
+                # Пауза после полного цикла: 30-45 секунд
+                cycle_sleep = random.uniform(30, 45)
+                logger.info(f"⏱️ Цикл завершён. Следующий через {cycle_sleep:.1f} сек")
+                await asyncio.sleep(cycle_sleep)
                 
             except Exception as e:
-                logger.error(f"❌ Discord ошибка: {e}")
+                logger.error(f"❌ Критическая ошибка в Discord слушателе: {e}")
                 self.error_count += 1
                 error_sleep = min(30 * (2 ** self.error_count), 300)
                 await asyncio.sleep(error_sleep)

@@ -1064,76 +1064,112 @@ class DiscordListener:
         """Отправляет данные в канал и личку (только новые)"""
         
         update_id = str(int(time.time()))
+        logger.info(f"📦 НОВЫЙ АПДЕЙТ: {update_id}")
+        logger.info(f"   all_items: {all_items}")
+        logger.info(f"   rare_items: {rare_items}")
+        logger.info(f"   weather_info: {weather_info}")
         
-        # 1. Отправка в основной канал (только редкие)
+        # Множество для отслеживания отправленных в этом апдейте
+        sent_in_update = set()
+        
+        # ===== 1. ОСНОВНОЙ КАНАЛ (только редкие) =====
         if rare_items and self.main_channel_id:
             for item_name, qty in rare_items:
-                if not was_item_sent_in_this_update(item_name, qty, update_id):
-                    msg = self.format_channel_message(item_name, qty)
-                    await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
-                    mark_item_sent_for_update(item_name, qty, update_id)
-                    logger.info(f"📤 Редкий предмет в основной канал: {item_name} x{qty}")
+                key = f"{item_name}_{qty}"
+                if key not in sent_in_update:
+                    if not was_item_sent_in_this_update(item_name, qty, update_id):
+                        msg = self.format_channel_message(item_name, qty)
+                        await self.bot.message_queue.queue.put((self.main_channel_id, msg, 'HTML', None))
+                        mark_item_sent_for_update(item_name, qty, update_id)
+                        sent_in_update.add(key)
+                        logger.info(f"📤 Основной канал: {item_name} x{qty}")
         
-        # 2. Отправка в каналы автопостинга (только редкие)
-        if rare_items:
+        # ===== 2. АВТОПОСТИНГ (только редкие, без дубликатов) =====
+        if rare_items and self.bot.posting_channels:
             for channel in self.bot.posting_channels:
                 try:
+                    channel_sent = set()
                     for item_name, qty in rare_items:
-                        if not was_item_sent_in_this_update(item_name, qty, update_id):
-                            msg = self.format_channel_message(item_name, qty)
-                            await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
-                            logger.info(f"📤 Редкий предмет в канал автопостинга {channel['name']}: {item_name} x{qty}")
+                        key = f"{item_name}_{qty}"
+                        if key not in channel_sent and key not in sent_in_update:
+                            if not was_item_sent_in_this_update(item_name, qty, update_id):
+                                msg = self.format_channel_message(item_name, qty)
+                                await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
+                                channel_sent.add(key)
+                                sent_in_update.add(key)
+                                logger.info(f"📤 Автопостинг {channel['name']}: {item_name} x{qty}")
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
         
-        # 3. Отправка в личку (ИСПРАВЛЕНО!)
+        # ===== 3. ПОГОДА =====
+        if weather_info:
+            weather_key = f"weather_{weather_info}"
+            if weather_key not in sent_in_update:
+                # Отправляем в автопостинг
+                for channel in self.bot.posting_channels:
+                    await self.bot.message_queue.queue.put((int(channel['id']), weather_info, 'HTML', None))
+                # Отправляем в личку
+                for msg in weather_info.split('\n'):
+                    if 'Актуальная погода' in msg:
+                        weather_type = None
+                        for w in WEATHER_LIST:
+                            if translate(w) in msg:
+                                weather_type = w
+                                break
+                        if weather_type:
+                            await self.send_weather_to_users(weather_type, None, update_id)
+                sent_in_update.add(weather_key)
+                logger.info(f"🌤 Отправлена погода")
+        
+        # ===== 4. ЛИЧКА (с учетом настроек, без дубликатов) =====
         if all_items:
             users = get_all_users()
             if users:
-                sent_count = 0
                 for user_id in users:
-                    if user_id != ADMIN_ID:
-                        settings = self.bot.user_manager.get_user(user_id)
-                        if settings.notifications_enabled:
-                            # Фильтруем предметы по настройкам пользователя (ТЕПЕРЬ РАБОТАЕТ!)
-                            user_items = []
-                            for name, qty in all_items:
-                                # Проверяем семена
-                                if name in SEEDS_LIST:
-                                    seed_settings = settings.seeds.get(name)
-                                    if seed_settings and seed_settings.enabled:
-                                        user_items.append((name, qty))
-                                # Проверяем снаряжение (включая лопатку)
-                                elif name in GEAR_LIST:
-                                    gear_settings = settings.gear.get(name)
-                                    if gear_settings and gear_settings.enabled:
-                                        user_items.append((name, qty))
-                                # Проверяем погоду
-                                elif name in WEATHER_LIST:
-                                    weather_settings = settings.weather.get(name)
-                                    if weather_settings and weather_settings.enabled:
-                                        user_items.append((name, qty))
-                                else:
-                                    logger.warning(f"⚠️ Неизвестный предмет: {name}")
-                            
-                            if user_items:
-                                # Проверяем, не отправляли ли уже
-                                has_new = False
-                                for name, qty in user_items:
-                                    if not was_item_sent_to_user(user_id, name, qty, update_id):
-                                        has_new = True
-                                        break
-                                
-                                if has_new:
-                                    pm_message = self.format_pm_message(user_items, weather_info)
-                                    if pm_message:
-                                        await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
-                                        for name, qty in user_items:
-                                            mark_item_sent_to_user(user_id, name, qty, update_id)
-                                        sent_count += 1
-                
-                if sent_count > 0:
-                    logger.info(f"📤 Отправлено {sent_count} пользователям из {len(users)}")
+                    if user_id == ADMIN_ID:
+                        continue
+                    
+                    settings = self.bot.user_manager.get_user(user_id)
+                    if not settings.notifications_enabled:
+                        continue
+                    
+                    # Собираем предметы для этого пользователя
+                    user_items = []
+                    user_items_keys = set()
+                    
+                    for name, qty in all_items:
+                        key = f"{name}_{qty}"
+                        
+                        # Пропускаем если уже отправлено в этом апдейте
+                        if key in sent_in_update:
+                            continue
+                        
+                        # Проверяем настройки пользователя
+                        enabled = False
+                        if name in SEEDS_LIST:
+                            seed_settings = settings.seeds.get(name)
+                            enabled = seed_settings and seed_settings.enabled
+                        elif name in GEAR_LIST:
+                            gear_settings = settings.gear.get(name)
+                            enabled = gear_settings and gear_settings.enabled
+                        elif name in WEATHER_LIST:
+                            weather_settings = settings.weather.get(name)
+                            enabled = weather_settings and weather_settings.enabled
+                        
+                        if enabled and not was_item_sent_to_user(user_id, name, qty, update_id):
+                            user_items.append((name, qty))
+                            user_items_keys.add(key)
+                    
+                    if user_items:
+                        pm_message = self.format_pm_message(user_items, weather_info if weather_info and weather_key not in sent_in_update else None)
+                        if pm_message:
+                            await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
+                            for name, qty in user_items:
+                                mark_item_sent_to_user(user_id, name, qty, update_id)
+                                sent_in_update.add(f"{name}_{qty}")
+                            logger.info(f"📤 Отправлено пользователю {user_id}: {len(user_items)} предметов")
+        
+        logger.info(f"✅ Апдейт {update_id} обработан, отправлено {len(sent_in_update)} уникальных элементов")
     
     async def run(self):
         if not DISCORD_TOKEN or not DISCORD_GUILD_ID:
@@ -1216,18 +1252,11 @@ class DiscordListener:
                                                         end_timestamp = current_time + (hours * 3600 + minutes * 60)
                                                 
                                                 weather_info = self.format_weather_started_message(name, end_timestamp)
-                                                # Отправляем уведомление о погоде отдельно
-                                                if not was_weather_notification_sent(name, 'started', str(msg_id)):
-                                                    # Отправляем в каналы автопостинга
-                                                    for channel in self.bot.posting_channels:
-                                                        await self.bot.message_queue.queue.put(
-                                                            (int(channel['id']), weather_info, 'HTML', None)
-                                                        )
-                                                    # И в личку
-                                                    await self.send_weather_to_users(name, end_timestamp, str(msg_id))
-                                                    mark_weather_notification_sent(name, 'started', str(msg_id))
+                                                logger.info(f"🌤 Сформирована погода: {weather_info}")
+                                                
+                                                # Отмечаем как отправленное позже в send_to_destinations
                                     
-                                    if all_items or rare_items:
+                                    if all_items or rare_items or weather_info:
                                         await self.send_to_destinations(all_items, rare_items, weather_info)
                                     else:
                                         logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")

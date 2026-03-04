@@ -4,4 +4,5 @@ __pycache__/
 bot.log
 users.json
 *.db
-.DS_Store
+.DS_Store".env" 
+".env.example" 

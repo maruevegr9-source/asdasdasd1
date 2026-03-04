@@ -25,7 +25,7 @@ load_dotenv()
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
-    level=logging.INFO,  # Включили обратно для отладки
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('bot.log', encoding='utf-8'),
@@ -1075,6 +1075,7 @@ class DiscordListener:
         # Множество для отслеживания отправленных в этом апдейте
         sent_in_update = set()
         stats = {'main': 0, 'autopost': 0, 'weather': 0, 'users': 0}
+        weather_key = None
         
         # ===== 1. ОСНОВНОЙ КАНАЛ (только редкие) =====
         if rare_items and self.main_channel_id:
@@ -1155,29 +1156,33 @@ class DiscordListener:
                         enabled = False
                         if name in SEEDS_LIST:
                             seed_settings = settings.seeds.get(name)
-                            enabled = seed_settings and seed_settings.enabled
+                            if seed_settings:
+                                enabled = seed_settings.enabled
                         elif name in GEAR_LIST:
                             gear_settings = settings.gear.get(name)
-                            enabled = gear_settings and gear_settings.enabled
+                            if gear_settings:
+                                enabled = gear_settings.enabled
                         elif name in WEATHER_LIST:
                             weather_settings = settings.weather.get(name)
-                            enabled = weather_settings and weather_settings.enabled
+                            if weather_settings:
+                                enabled = weather_settings.enabled
                         
                         if enabled and not was_item_sent_to_user(user_id, name, qty, update_id):
                             user_items.append((name, qty))
+                            logger.info(f"✅ Добавлен {name} x{qty} для user {user_id}")
                     
                     if user_items:
-                        pm_message = self.format_pm_message(user_items, weather_info if weather_info and weather_key not in sent_in_update else None)
+                        pm_message = self.format_pm_message(user_items, weather_info if weather_info and weather_key and weather_key not in sent_in_update else None)
                         if pm_message:
                             await self.bot.message_queue.queue.put((user_id, pm_message, 'HTML', None))
                             for name, qty in user_items:
                                 mark_item_sent_to_user(user_id, name, qty, update_id)
                                 sent_in_update.add(f"{name}_{qty}")
                             user_count += 1
+                            logger.info(f"📤 Отправлено пользователю {user_id}: {len(user_items)} предметов")
                 
                 if user_count > 0:
                     stats['users'] = user_count
-                    logger.info(f"📤 Отправлено {user_count} пользователям")
         
         logger.info(f"✅ Апдейт {update_id} обработан: main={stats['main']}, autopost={stats['autopost']}, weather={stats['weather']}, users={stats['users']}")
     

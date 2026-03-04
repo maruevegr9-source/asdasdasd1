@@ -173,6 +173,32 @@ def get_db():
     conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
+def clear_stocks_on_deploy():
+    """Очищает таблицы с историей стоков при каждом деплое на Railway"""
+    try:
+        if os.environ.get('RAILWAY_ENVIRONMENT'):
+            logger.info("🧹 Railway деплой: очищаю историю стоков...")
+            conn = get_db()
+            cur = conn.cursor()
+            
+            # Проверяем какие таблицы существуют
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = [t[0] for t in cur.fetchall()]
+            logger.info(f"📋 Найдены таблицы: {tables}")
+            
+            # Очищаем только таблицы с историей стоков
+            stock_tables = ['sent_items', 'user_sent_items', 'weather_notifications', 'mailing_history']
+            for table in stock_tables:
+                if table in tables:
+                    cur.execute(f"DELETE FROM {table};")
+                    logger.info(f"✅ {table}: очищено {cur.rowcount} записей")
+            
+            conn.commit()
+            conn.close()
+            logger.info("✅ История стоков успешно очищена при деплое")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при очистке стоков: {e}")
+
 def init_database():
     try:
         conn = get_db()
@@ -266,6 +292,10 @@ def init_database():
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована успешно")
+        
+        # Очищаем стоки при деплое (после создания таблиц)
+        clear_stocks_on_deploy()
+        
         return True
         
     except Exception as e:
@@ -876,6 +906,7 @@ class DiscordListener:
         self.role_cache = {}
         self.running = True
         self.main_channel_id = int(MAIN_CHANNEL_ID) if MAIN_CHANNEL_ID else None
+        self.error_count = 0
         
         try:
             if os.path.exists('last_discord.json'):
@@ -1104,18 +1135,18 @@ class DiscordListener:
             try:
                 # Проверяем ночной режим
                 if is_night_time_msk():
-                    # Ночной режим: спим 15-20 минут
-                    night_sleep = random.randint(900, 1200)  # 15-20 минут
+                    # Ночной режим: спим 10-15 минут
+                    night_sleep = random.randint(600, 900)  # 10-15 минут
                     logger.info(f"🌙 Ночной режим (1:00-8:00 МСК). Спим {night_sleep/60:.1f} минут...")
                     await asyncio.sleep(night_sleep)
+                    self.error_count = 0  # Сброс счетчика ошибок
                     continue
                 
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
-                    # Иногда пропускаем канал для естественности (10% шанс)
-                    if random.random() < 0.1:
+                    # Пропускаем каналы для естественности (кроме seeds!)
+                    if channel_name != 'seeds' and random.random() < 0.1:
                         logger.info(f"⏭️ Пропускаем {channel_name} (естественность)")
-                        # Но все равно делаем небольшую паузу
-                        await asyncio.sleep(random.uniform(40, 70))
+                        await asyncio.sleep(random.uniform(30, 50))
                         continue
                     
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
@@ -1124,6 +1155,7 @@ class DiscordListener:
                     r = requests.get(url, headers=self.headers, timeout=5)
                     
                     if r.status_code == 200:
+                        self.error_count = 0  # Сброс счетчика при успехе
                         messages = r.json()
                         logger.info(f"✅ Получены сообщения, количество: {len(messages)}")
                         
@@ -1156,7 +1188,6 @@ class DiscordListener:
                                                 time_match = re.search(r'(\d{1,2}):(\d{2})', msg['content'])
                                                 if time_match:
                                                     # Конвертируем в timestamp (приблизительно)
-                                                    # Это упрощенная версия, можно доработать
                                                     current_time = int(time.time())
                                                     hours, minutes = map(int, time_match.groups())
                                                     # Предполагаем, что время сегодня/завтра
@@ -1185,17 +1216,24 @@ class DiscordListener:
                                 logger.info(f"⏭️ Не Dawnbot, пропускаем")
                     else:
                         logger.error(f"❌ Ошибка Discord API: {r.status_code}")
+                        self.error_count += 1
+                        # Экспоненциальная задержка при ошибках
+                        error_sleep = min(30 * (2 ** self.error_count), 300)  # 30, 60, 120, 240, макс 300
+                        logger.info(f"⏱️ Пауза после ошибки: {error_sleep} сек (попытка {self.error_count})")
+                        await asyncio.sleep(error_sleep)
+                        continue
                     
-                    # Пауза между каналами: 40-70 секунд
-                    await asyncio.sleep(random.uniform(40, 70))
+                    # Пауза между каналами: 20-40 секунд
+                    await asyncio.sleep(random.uniform(20, 40))
                 
-                # Пауза после полного цикла: 120-180 секунд (2-3 минуты)
-                # В сумме с паузами между каналами получается ~5-6.5 минут
-                await asyncio.sleep(random.uniform(120, 180))
+                # Пауза после полного цикла: 60-120 секунд
+                await asyncio.sleep(random.uniform(60, 120))
                 
             except Exception as e:
                 logger.error(f"❌ Discord ошибка: {e}")
-                await asyncio.sleep(30)
+                self.error_count += 1
+                error_sleep = min(30 * (2 ** self.error_count), 300)
+                await asyncio.sleep(error_sleep)
     
     def stop(self):
         self.running = False

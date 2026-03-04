@@ -155,6 +155,14 @@ def get_msk_time_from_timestamp(timestamp: int) -> str:
         logger.error(f"❌ Ошибка конвертации времени: {e}")
         return "??:??:??"
 
+# ========== ФУНКЦИЯ ПРОВЕРКИ НОЧНОГО РЕЖИМА ==========
+def is_night_time_msk() -> bool:
+    """Проверяет, сейчас ночь по МСК (1:00 - 8:00)"""
+    now_msk = datetime.now(MSK_TIMEZONE)
+    hour = now_msk.hour
+    # Ночь с 1:00 до 8:00
+    return 1 <= hour < 8
+
 # ========== БАЗА ДАННЫХ ==========
 
 def get_db():
@@ -973,14 +981,53 @@ class DiscordListener:
         return "\n\n".join(message_parts) if message_parts else None
     
     def format_weather_started_message(self, weather_type: str, end_timestamp: int = None) -> str:
+        """Форматирует сообщение о погоде в красивом стиле"""
         translated = translate(weather_type)
+        
+        # Эмодзи для разных типов погоды
+        weather_emojis = {
+            "fog": "🌫️", "rain": "🌧️", "snow": "❄️", 
+            "storm": "⛈️", "sandstorm": "🏜️", "starfall": "⭐"
+        }
+        emoji = weather_emojis.get(weather_type, "🌤️")
+        
         if end_timestamp:
-            try:
-                msk_time = get_msk_time_from_timestamp(end_timestamp)
-                return f"<b>🌤️ Началась погода {translated}! Активна до {msk_time} (МСК)</b>"
-            except:
-                return f"<b>🌤️ Началась погода {translated}!</b>"
-        return f"<b>🌤️ Началась погода {translated}!</b>"
+            msk_time = get_msk_time_from_timestamp(end_timestamp)
+            # Разбиваем время, чтобы показать только часы и минуты
+            time_parts = msk_time.split(':')
+            display_time = f"{time_parts[0]}:{time_parts[1]}" if len(time_parts) >= 2 else msk_time
+            
+            return (
+                f"{emoji} <b>Актуальная погода:</b>\n"
+                f"⛈ <b>{translated}!</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"{display_time} по МСК"
+            )
+        else:
+            return (
+                f"{emoji} <b>Актуальная погода:</b>\n"
+                f"⛈ <b>{translated}!</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"Неизвестное время"
+            )
+    
+    async def send_weather_to_users(self, weather_type: str, end_timestamp: int = None, update_id: str = None):
+        """Отправляет уведомление о погоде всем пользователям"""
+        weather_msg = self.format_weather_started_message(weather_type, end_timestamp)
+        users = get_all_users()
+        
+        if users and update_id:
+            sent_count = 0
+            for user_id in users:
+                if user_id != ADMIN_ID:
+                    settings = self.bot.user_manager.get_user(user_id)
+                    if settings.notifications_enabled and settings.weather.get(weather_type, ItemSettings()).enabled:
+                        if not was_weather_notification_sent(weather_type, 'started', update_id):
+                            await self.bot.message_queue.queue.put((user_id, weather_msg, 'HTML', None))
+                            sent_count += 1
+            
+            if sent_count > 0:
+                logger.info(f"🌤 Отправлено уведомление о погоде {weather_type} {sent_count} пользователям")
     
     async def send_to_destinations(self, all_items, rare_items, weather_info=None):
         """Отправляет данные в канал и личку (только новые)"""
@@ -1055,7 +1102,22 @@ class DiscordListener:
         
         while self.running:
             try:
+                # Проверяем ночной режим
+                if is_night_time_msk():
+                    # Ночной режим: спим 15-20 минут
+                    night_sleep = random.randint(900, 1200)  # 15-20 минут
+                    logger.info(f"🌙 Ночной режим (1:00-8:00 МСК). Спим {night_sleep/60:.1f} минут...")
+                    await asyncio.sleep(night_sleep)
+                    continue
+                
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
+                    # Иногда пропускаем канал для естественности (10% шанс)
+                    if random.random() < 0.1:
+                        logger.info(f"⏭️ Пропускаем {channel_name} (естественность)")
+                        # Но все равно делаем небольшую паузу
+                        await asyncio.sleep(random.uniform(40, 70))
+                        continue
+                    
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
                     
                     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit=5"
@@ -1081,8 +1143,39 @@ class DiscordListener:
                                 logger.info(f"📨 Это Dawnbot! Парсим...")
                                 all_items, rare_items = self.parse_message(msg, channel_name)
                                 
+                                # Проверяем погоду отдельно
+                                weather_info = None
+                                if channel_name == 'weather' and all_items:
+                                    # Для погоды формируем специальное сообщение
+                                    for name, qty in all_items:
+                                        if name in WEATHER_LIST:
+                                            # Пытаемся найти время окончания в сообщении
+                                            end_timestamp = None
+                                            if msg.get('content'):
+                                                # Ищем время в формате HH:MM
+                                                time_match = re.search(r'(\d{1,2}):(\d{2})', msg['content'])
+                                                if time_match:
+                                                    # Конвертируем в timestamp (приблизительно)
+                                                    # Это упрощенная версия, можно доработать
+                                                    current_time = int(time.time())
+                                                    hours, minutes = map(int, time_match.groups())
+                                                    # Предполагаем, что время сегодня/завтра
+                                                    end_timestamp = current_time + (hours * 3600 + minutes * 60)
+                                            
+                                            weather_info = self.format_weather_started_message(name, end_timestamp)
+                                            # Отправляем уведомление о погоде отдельно
+                                            if not was_weather_notification_sent(name, 'started', str(msg_id)):
+                                                # Отправляем в каналы автопостинга
+                                                for channel in self.bot.posting_channels:
+                                                    await self.bot.message_queue.queue.put(
+                                                        (int(channel['id']), weather_info, 'HTML', None)
+                                                    )
+                                                # И в личку
+                                                await self.send_weather_to_users(name, end_timestamp, str(msg_id))
+                                                mark_weather_notification_sent(name, 'started', str(msg_id))
+                                
                                 if all_items or rare_items:
-                                    await self.send_to_destinations(all_items, rare_items)
+                                    await self.send_to_destinations(all_items, rare_items, weather_info)
                                 else:
                                     logger.warning(f"⚠️ Не найдено предметов в сообщении от Dawnbot")
                                 
@@ -1093,9 +1186,12 @@ class DiscordListener:
                     else:
                         logger.error(f"❌ Ошибка Discord API: {r.status_code}")
                     
-                    await asyncio.sleep(1)
+                    # Пауза между каналами: 40-70 секунд
+                    await asyncio.sleep(random.uniform(40, 70))
                 
-                await asyncio.sleep(10)
+                # Пауза после полного цикла: 120-180 секунд (2-3 минуты)
+                # В сумме с паузами между каналами получается ~5-6.5 минут
+                await asyncio.sleep(random.uniform(120, 180))
                 
             except Exception as e:
                 logger.error(f"❌ Discord ошибка: {e}")
@@ -2121,23 +2217,8 @@ class GardenHorizonsBot:
                 
                 await query.message.reply_text("✅ <b>Подписка подтверждена!</b>", parse_mode='HTML')
                 
-                text = MAIN_MENU_TEXT
-                keyboard = [
-                    [InlineKeyboardButton("⚙️ АВТО-СТОК", callback_data="menu_settings"),
-                     InlineKeyboardButton("📦 СТОК", callback_data="menu_stock")],
-                    [InlineKeyboardButton("🔔 УВЕДОМЛЕНИЯ ВКЛ", callback_data="notifications_on"),
-                     InlineKeyboardButton("🔕 УВЕДОМЛЕНИЯ ВЫКЛ", callback_data="notifications_off")]
-                ]
-                
-                if settings.is_admin:
-                    keyboard.append([InlineKeyboardButton("👑 АДМИН-ПАНЕЛЬ", callback_data="admin_panel")])
-                
-                await query.message.reply_photo(
-                    photo=IMAGE_MAIN,
-                    caption=text,
-                    parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                # Сразу показываем главное меню
+                await self.show_main_menu_callback(query)
             else:
                 await query.answer("❌ Подписка не подтверждена!", show_alert=True)
             return
@@ -2262,9 +2343,22 @@ class GardenHorizonsBot:
                 
                 if end_timestamp and wtype in TRANSLATIONS:
                     msk_time = get_msk_time_from_timestamp(end_timestamp)
-                    parts.append(f"<b>{translate(wtype)} АКТИВНА</b> до {msk_time} (МСК)")
+                    time_parts = msk_time.split(':')
+                    display_time = f"{time_parts[0]}:{time_parts[1]}" if len(time_parts) >= 2 else msk_time
+                    
+                    parts.append(
+                        f"🌤 <b>Актуальная погода:</b>\n"
+                        f"⛈ <b>{translate(wtype)}!</b>\n"
+                        f"━━━━━━━━━━━━━━━━\n"
+                        f"{display_time} по МСК"
+                    )
                 elif wtype in TRANSLATIONS:
-                    parts.append(f"<b>{translate(wtype)} АКТИВНА</b>")
+                    parts.append(
+                        f"🌤 <b>Актуальная погода:</b>\n"
+                        f"⛈ <b>{translate(wtype)}!</b>\n"
+                        f"━━━━━━━━━━━━━━━━\n"
+                        f"Неизвестное время"
+                    )
         
         return "\n\n".join(parts) if parts else None
     

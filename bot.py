@@ -1086,7 +1086,7 @@ class DiscordListener:
                 except Exception as e:
                     logger.error(f"Ошибка отправки в канал {channel['name']}: {e}")
         
-        # 3. Отправка в личку (только выбранные пользователем предметы, одним сообщением)
+        # 3. Отправка в личку (ИСПРАВЛЕНО!)
         if all_items:
             users = get_all_users()
             if users:
@@ -1095,15 +1095,26 @@ class DiscordListener:
                     if user_id != ADMIN_ID:
                         settings = self.bot.user_manager.get_user(user_id)
                         if settings.notifications_enabled:
-                            # Фильтруем предметы по настройкам пользователя
+                            # Фильтруем предметы по настройкам пользователя (ТЕПЕРЬ РАБОТАЕТ!)
                             user_items = []
                             for name, qty in all_items:
-                                if name in SEEDS_LIST and settings.seeds.get(name, ItemSettings()).enabled:
-                                    user_items.append((name, qty))
-                                elif name in GEAR_LIST and settings.gear.get(name, ItemSettings()).enabled:
-                                    user_items.append((name, qty))
-                                elif name in WEATHER_LIST and settings.weather.get(name, ItemSettings()).enabled:
-                                    user_items.append((name, qty))
+                                # Проверяем семена
+                                if name in SEEDS_LIST:
+                                    seed_settings = settings.seeds.get(name)
+                                    if seed_settings and seed_settings.enabled:
+                                        user_items.append((name, qty))
+                                # Проверяем снаряжение (включая лопатку)
+                                elif name in GEAR_LIST:
+                                    gear_settings = settings.gear.get(name)
+                                    if gear_settings and gear_settings.enabled:
+                                        user_items.append((name, qty))
+                                # Проверяем погоду
+                                elif name in WEATHER_LIST:
+                                    weather_settings = settings.weather.get(name)
+                                    if weather_settings and weather_settings.enabled:
+                                        user_items.append((name, qty))
+                                else:
+                                    logger.warning(f"⚠️ Неизвестный предмет: {name}")
                             
                             if user_items:
                                 # Проверяем, не отправляли ли уже
@@ -1151,9 +1162,7 @@ class DiscordListener:
                     continue
                 
                 for channel_name, channel_id in DISCORD_CHANNELS.items():
-                    # Рандомная пауза перед каждым каналом
-                    await asyncio.sleep(random.uniform(2, 5))
-                    
+                    # НИКАКИХ ПРОПУСКОВ! Проверяем все каналы всегда
                     logger.info(f"🔍 Проверка канала {channel_name} (ID: {channel_id})")
                     
                     # Меняем User-Agent каждый раз
@@ -1252,11 +1261,11 @@ class DiscordListener:
                         await asyncio.sleep(error_sleep)
                         continue
                     
-                    # Пауза между каналами: 15-25 секунд
-                    await asyncio.sleep(random.uniform(15, 25))
+                    # Пауза между каналами: 5-10 секунд
+                    await asyncio.sleep(random.uniform(5, 10))
                 
-                # Пауза после полного цикла: 30-45 секунд
-                cycle_sleep = random.uniform(30, 45)
+                # Пауза после полного цикла: 15-25 секунд
+                cycle_sleep = random.uniform(15, 25)
                 logger.info(f"⏱️ Цикл завершён. Следующий через {cycle_sleep:.1f} сек")
                 await asyncio.sleep(cycle_sleep)
                 

@@ -976,9 +976,12 @@ class DiscordListener:
                 if role_name:
                     qty = self.extract_quantity(msg, role_name)
                     all_items.append((role_name, qty))
+                    logger.info(f"📦 Найден предмет: {role_name} x{qty}")
                     if is_allowed_for_main_channel(role_name):
                         rare_items.append((role_name, qty))
+                        logger.info(f"⭐ Редкий: {role_name}")
         
+        logger.info(f"📊 Итого: all_items={len(all_items)}, rare_items={len(rare_items)}")
         return all_items, rare_items
     
     def format_channel_message(self, item_name: str, quantity: int) -> str:
@@ -1084,18 +1087,16 @@ class DiscordListener:
                         sent_in_update.add(key)
                         logger.info(f"📤 Основной канал: {item_name} x{qty}")
         
-        # ===== 2. АВТОПОСТИНГ (только редкие, без дубликатов) =====
+        # ===== 2. АВТОПОСТИНГ (только редкие) =====
         if rare_items and self.bot.posting_channels:
             for channel in self.bot.posting_channels:
                 try:
-                    channel_sent = set()
                     for item_name, qty in rare_items:
                         key = f"{item_name}_{qty}"
-                        if key not in channel_sent and key not in sent_in_update:
+                        if key not in sent_in_update:
                             if not was_item_sent_in_this_update(item_name, qty, update_id):
                                 msg = self.format_channel_message(item_name, qty)
                                 await self.bot.message_queue.queue.put((int(channel['id']), msg, 'HTML', None))
-                                channel_sent.add(key)
                                 sent_in_update.add(key)
                                 logger.info(f"📤 Автопостинг {channel['name']}: {item_name} x{qty}")
                 except Exception as e:
@@ -1108,20 +1109,22 @@ class DiscordListener:
                 # Отправляем в автопостинг
                 for channel in self.bot.posting_channels:
                     await self.bot.message_queue.queue.put((int(channel['id']), weather_info, 'HTML', None))
+                
                 # Отправляем в личку
-                for msg in weather_info.split('\n'):
-                    if 'Актуальная погода' in msg:
-                        weather_type = None
-                        for w in WEATHER_LIST:
-                            if translate(w) in msg:
-                                weather_type = w
-                                break
-                        if weather_type:
-                            await self.send_weather_to_users(weather_type, None, update_id)
+                # Ищем тип погоды в сообщении
+                weather_type = None
+                for w in WEATHER_LIST:
+                    if translate(w) in weather_info:
+                        weather_type = w
+                        break
+                
+                if weather_type:
+                    await self.send_weather_to_users(weather_type, None, update_id)
+                
                 sent_in_update.add(weather_key)
                 logger.info(f"🌤 Отправлена погода")
         
-        # ===== 4. ЛИЧКА (с учетом настроек, без дубликатов) =====
+        # ===== 4. ЛИЧКА (ВСЕ предметы с учетом настроек) =====
         if all_items:
             users = get_all_users()
             if users:
@@ -1149,9 +1152,13 @@ class DiscordListener:
                         if name in SEEDS_LIST:
                             seed_settings = settings.seeds.get(name)
                             enabled = seed_settings and seed_settings.enabled
+                            if enabled:
+                                logger.info(f"🌱 Семя {name} включено для user {user_id}")
                         elif name in GEAR_LIST:
                             gear_settings = settings.gear.get(name)
                             enabled = gear_settings and gear_settings.enabled
+                            if enabled:
+                                logger.info(f"⚙️ Гирс {name} включено для user {user_id}")
                         elif name in WEATHER_LIST:
                             weather_settings = settings.weather.get(name)
                             enabled = weather_settings and weather_settings.enabled
@@ -1159,6 +1166,7 @@ class DiscordListener:
                         if enabled and not was_item_sent_to_user(user_id, name, qty, update_id):
                             user_items.append((name, qty))
                             user_items_keys.add(key)
+                            logger.info(f"✅ Добавлен {name} x{qty} для user {user_id}")
                     
                     if user_items:
                         pm_message = self.format_pm_message(user_items, weather_info if weather_info and weather_key not in sent_in_update else None)
@@ -1167,7 +1175,7 @@ class DiscordListener:
                             for name, qty in user_items:
                                 mark_item_sent_to_user(user_id, name, qty, update_id)
                                 sent_in_update.add(f"{name}_{qty}")
-                            logger.info(f"📤 Отправлено пользователю {user_id}: {len(user_items)} предметов")
+                            logger.info(f"📤 Отправлено пользователю {user_id}: {len(user_items)} предметов: {user_items}")
         
         logger.info(f"✅ Апдейт {update_id} обработан, отправлено {len(sent_in_update)} уникальных элементов")
     

@@ -1152,7 +1152,7 @@ class DiscordListener:
                         if key in sent_in_update:
                             continue
                         
-                        # Проверяем настройки пользователя
+                        # Проверяем настройки пользователя - ИСПРАВЛЕНО!
                         enabled = False
                         if name in SEEDS_LIST:
                             seed_settings = settings.seeds.get(name)
